@@ -101,6 +101,8 @@ export default function Game() {
   const insets = useSafeAreaInsets();
   const kbHeight = useKeyboardHeight();
   const { width } = useWindowDimensions();
+  // Width of the play area, measured on layout; the screen width minus the side padding until then.
+  const [stageWidth, setStageWidth] = useState(width - 36);
 
   const G = useRef<GameState>(freshState(DIFFICULTIES.medium)).current;
   const [, setVersion] = useState(0);
@@ -169,7 +171,7 @@ export default function Game() {
   };
 
   /* ---------- effects ---------- */
-  const charWidth = (len: number) => wordFontSize(len, width) * 0.6;
+  const charWidth = (len: number) => wordFontSize(len, stageWidth) * 0.6 + LETTER_PAD;
 
   const addFloat = (text: string, kind: Float["kind"], letterIndex?: number) => {
     const id = ++floatId.current;
@@ -414,7 +416,7 @@ export default function Game() {
   const oneLife = G.d.lives === 1;
   const low = !oneLife && G.lives > 0 && G.lives <= Math.ceil(G.d.lives * 0.3);
   const bestHere = best[G.d.id];
-  const fontSize = wordFontSize(G.word.length || 8, width);
+  const fontSize = wordFontSize(G.word.length || 8, stageWidth);
   const hotOpacity = fuse.interpolate({ inputRange: [0, 0.3, 0.31, 1], outputRange: [1, 1, 0, 0] });
   const accuracy = G.keys ? `${Math.round((G.goodKeys / G.keys) * 100)}%` : "–";
   const prevLimit = G.round > 1 ? timeForRound(G.round - 1, G.d) : G.limit;
@@ -467,7 +469,12 @@ export default function Game() {
       </View>
 
       {/* Stage */}
-      <Pressable style={s.stage} onPress={focusInput} accessibilityLabel="Tap to bring up the keyboard">
+      <Pressable
+        style={s.stage}
+        onPress={focusInput}
+        onLayout={e => setStageWidth(e.nativeEvent.layout.width)}
+        accessibilityLabel="Tap to bring up the keyboard"
+      >
         <View style={s.wordWrap}>
           {floats.map(f => (
             <Animated.Text
@@ -705,9 +712,15 @@ function DifficultyCard({
 
 /* ---------- small components ---------- */
 
-function wordFontSize(len: number, screenWidth: number) {
-  const avail = Math.min(screenWidth, 700) - 40;
-  return Math.max(26, Math.min(76, Math.floor(avail / (len * 0.64))));
+// IBM Plex Mono advances 0.6em per glyph; 0.62 leaves a little room for rounding.
+const MONO_ADVANCE = 0.62;
+const LETTER_PAD = 2; // letterBox paddingHorizontal, both sides
+const WORD_MARGIN = 8; // breathing room so the shake doesn't touch the edges
+
+/** Largest font size (up to 76) at which a word of `len` letters fits in `availWidth`. */
+function wordFontSize(len: number, availWidth: number) {
+  const usable = availWidth - WORD_MARGIN - len * LETTER_PAD;
+  return Math.max(10, Math.min(76, Math.floor(usable / (len * MONO_ADVANCE))));
 }
 
 /** Seconds left on the clock, ticking on its own so the whole game doesn't re-render. */
