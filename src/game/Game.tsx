@@ -107,6 +107,11 @@ export default function Game() {
   // real width is measured. The visible word is then sized from that measurement so it always fits,
   // and stays hidden until the measurement is in, so an overflow never shows.
   const [probe, setProbe] = useState<{ word: string; widthPerPx: number } | null>(null);
+  // After that, the visible word itself is checked: `override` lowers its size if it still runs
+  // past the edge, and `fitOk` records the size at which it was confirmed to fit.
+  type SizeFor = { word: string; stageWidth: number; size: number };
+  const [override, setOverride] = useState<SizeFor | null>(null);
+  const [fitOk, setFitOk] = useState<SizeFor | null>(null);
 
   const G = useRef<GameState>(freshState(DIFFICULTIES.medium)).current;
   const [, setVersion] = useState(0);
@@ -179,9 +184,28 @@ export default function Game() {
   const currentFontSize = () => {
     const m = measured();
     const len = G.word.length || 8;
-    if (!m) return wordFontSize(len, stageWidth); // estimate, only used while hidden
-    const usable = stageWidth - WORD_MARGIN - len * LETTER_PAD;
-    return Math.max(MIN_WORD_FONT, Math.min(MAX_WORD_FONT, Math.floor(usable / m.widthPerPx)));
+    let size: number;
+    if (!m) size = wordFontSize(len, stageWidth); // estimate, only used while hidden
+    else {
+      const usable = stageWidth - WORD_MARGIN - len * LETTER_PAD;
+      size = Math.max(MIN_WORD_FONT, Math.min(MAX_WORD_FONT, Math.floor(usable / m.widthPerPx)));
+    }
+    // The on-screen check below can only lower the size further.
+    const o = override;
+    if (o && o.word === G.word && o.stageWidth === stageWidth) size = Math.min(size, o.size);
+    return size;
+  };
+
+  // Second check, on the word actually shown: where does its last letter end?
+  const onLastLetterLayout = (x: number, w: number, size: number) => {
+    const contentWidth = x + w;
+    const avail = stageWidth - WORD_MARGIN;
+    if (contentWidth > avail + 0.5 && size > MIN_WORD_FONT) {
+      const next = Math.max(MIN_WORD_FONT, Math.min(size - 1, Math.floor((size * avail) / contentWidth)));
+      setOverride({ word: G.word, stageWidth, size: next });
+    } else if (!(fitOk && fitOk.word === G.word && fitOk.size === size && fitOk.stageWidth === stageWidth)) {
+      setFitOk({ word: G.word, stageWidth, size });
+    }
   };
   const charWidth = () => {
     const m = measured();
@@ -433,7 +457,13 @@ export default function Game() {
   const low = !oneLife && G.lives > 0 && G.lives <= Math.ceil(G.d.lives * 0.3);
   const bestHere = best[G.d.id];
   const fontSize = currentFontSize();
-  const wordReady = G.word === "" || measured() !== null;
+  const wordReady =
+    G.word === "" ||
+    (measured() !== null &&
+      fitOk !== null &&
+      fitOk.word === G.word &&
+      fitOk.size === fontSize &&
+      fitOk.stageWidth === stageWidth);
   const hotOpacity = fuse.interpolate({ inputRange: [0, 0.3, 0.31, 1], outputRange: [1, 1, 0, 0] });
   const accuracy = G.keys ? `${Math.round((G.goodKeys / G.keys) * 100)}%` : "–";
   const prevLimit = G.round > 1 ? timeForRound(G.round - 1, G.d) : G.limit;
@@ -512,6 +542,7 @@ export default function Game() {
             </Animated.Text>
           ))}
           <Animated.View
+            key={`${G.wordId}-${G.word}`} // fresh layout (and fit check) for every word
             style={[s.word, { opacity: wordReady ? 1 : 0, transform: [{ translateX: shake }] }]}
             accessibilityLabel={`Word ${G.word}`}
           >
@@ -528,6 +559,11 @@ export default function Game() {
               return (
                 <Animated.View
                   key={i}
+                  onLayout={
+                    i === G.word.length - 1
+                      ? e => onLastLetterLayout(e.nativeEvent.layout.x, e.nativeEvent.layout.width, fontSize)
+                      : undefined
+                  }
                   style={[
                     s.letterBox,
                     wrong && { backgroundColor: c.missSoft },
