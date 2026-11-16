@@ -14,6 +14,9 @@ export type Palette = {
   miss: string;
   missSoft: string;
   scrim: string;
+  gold: string;
+  ice: string;
+  violet: string;
 };
 
 const light: Palette = {
@@ -30,6 +33,9 @@ const light: Palette = {
   miss: "#E3223A",
   missSoft: "rgba(227, 34, 58, 0.14)",
   scrim: "rgba(238, 241, 247, 0.9)",
+  gold: "#B07612",
+  ice: "#0B87AE",
+  violet: "#7A3FE0",
 };
 
 const dark: Palette = {
@@ -46,6 +52,9 @@ const dark: Palette = {
   miss: "#FF4A5C",
   missSoft: "rgba(255, 74, 92, 0.18)",
   scrim: "rgba(12, 16, 32, 0.9)",
+  gold: "#F2C14E",
+  ice: "#5CC8EC",
+  violet: "#B595FF",
 };
 
 export const fonts = {

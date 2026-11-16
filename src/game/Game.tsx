@@ -38,10 +38,11 @@ import { fonts, usePalette, type Palette } from "./theme";
 import { initSounds, play, setMuted } from "./sound";
 import { loadPrefs, saveBest, saveDifficulty, saveMuted, type BestScores } from "./storage";
 import { useKeyboardHeight } from "./useKeyboardHeight";
+import { POWERUPS, REWARDS, rewardThreshold, rollPowerUp, type PowerUpId } from "./powerups";
 
 type Phase = "title" | "banner" | "playing" | "between" | "paused" | "over";
-type WordLook = "normal" | "solved" | "timedOut";
-type Float = { id: number; text: string; kind: "good" | "bad"; x: number; anim: Animated.Value };
+type WordLook = "normal" | "solved" | "timedOut" | "skipped";
+type Float = { id: number; text: string; kind: "good" | "bad" | "reward"; x: number; anim: Animated.Value };
 
 type GameState = {
   d: Difficulty;
@@ -58,8 +59,17 @@ type GameState = {
   look: WordLook;
   wordId: number;
   wordStart: number;
-  limit: number;
-  pausedRemaining: number; // fraction of the clock left when paused
+  limit: number; // the round's time per word
+  wordLimit: number; // this word's clock: the round's, or longer under Slow-Mo
+  pausedRemaining: number; // fraction of the clock left when paused or frozen
+  frozen: boolean; // Freeze power-up is holding the clock
+  inventory: PowerUpId[]; // the power-up bucket, oldest first
+  rewardsEarned: number;
+  nextRewardAt: number; // score that earns the next power-up
+  shields: number; // misses/timeouts that will be blocked
+  slowWords: number; // upcoming words that get Slow-Mo time
+  doubleWords: number; // upcoming finished words that score double
+  powerUpsUsed: number;
   keys: number;
   goodKeys: number;
   wordsTyped: number;
@@ -86,7 +96,16 @@ function freshState(d: Difficulty): GameState {
     wordId: 0,
     wordStart: 0,
     limit: timeForRound(1, d),
+    wordLimit: timeForRound(1, d),
     pausedRemaining: 1,
+    frozen: false,
+    inventory: [],
+    rewardsEarned: 0,
+    nextRewardAt: rewardThreshold(0),
+    shields: 0,
+    slowWords: 0,
+    doubleWords: 0,
+    powerUpsUsed: 0,
     keys: 0,
     goodKeys: 0,
     wordsTyped: 0,
@@ -218,7 +237,7 @@ export default function Game() {
     fuse.setValue(fromFraction);
     Animated.timing(fuse, {
       toValue: 0,
-      duration: fromFraction * G.limit * 1000,
+      duration: fromFraction * G.wordLimit * 1000,
       easing: Easing.linear,
       useNativeDriver: true,
     }).start(({ finished }) => {
@@ -288,6 +307,11 @@ export default function Game() {
     G.look = "normal";
     G.wordId++;
     G.wordStart = Date.now();
+    G.frozen = false;
+    if (G.slowWords > 0) {
+      G.wordLimit = G.limit * REWARDS.slowFactor;
+      G.slowWords--;
+    } else G.wordLimit = G.limit;
     G.phase = "playing";
     resetInput();
     runClock(1);
@@ -322,7 +346,14 @@ export default function Game() {
       letterPop.setValue(1.35);
       Animated.spring(letterPop, { toValue: 1, friction: 4, useNativeDriver: true }).start();
       play("miss");
-      addFloat(G.d.lives === 1 ? "Miss" : "−1 life", "bad", G.pos);
+      if (G.shields > 0) {
+        G.shields--;
+        addFloat("Shield blocked it", "reward", G.pos);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+        bump();
+        return;
+      }
+      addFloat(G.lives === 1 ? "Miss" : "−1 life", "bad", G.pos);
       loseLife(1);
       if (G.lives <= 0) {
         G.phase = "between";
@@ -335,16 +366,22 @@ export default function Game() {
 
   const solved = () => {
     const used = (Date.now() - G.wordStart) / 1000;
-    const pts = scoreWord(G.round, used, G.limit, G.wordMisses);
+    let pts = scoreWord(G.round, used, G.wordLimit, G.wordMisses);
+    const doubled = G.doubleWords > 0;
+    if (doubled) {
+      pts *= 2;
+      G.doubleWords--;
+    }
     G.score += pts;
     G.wordsTyped++;
     if (!G.fastest || used < G.fastest.t) G.fastest = { t: used, w: G.word };
     G.phase = "between";
     G.look = "solved";
     fuse.stopAnimation();
-    addFloat(`+${pts}${G.wordMisses === 0 ? " flawless" : ""}`, "good");
+    addFloat(`+${pts}${doubled ? " (2×)" : ""}${G.wordMisses === 0 ? " flawless" : ""}`, "good");
     play("word");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    checkRewards();
     bump();
     later(advance, 260);
   };
@@ -353,9 +390,14 @@ export default function Game() {
     G.phase = "between";
     G.look = "timedOut";
     G.wrongAt = null;
-    addFloat(G.d.lives === 1 ? "Too slow" : `Too slow · −${CONFIG.timeoutCost} life`, "bad");
     play("timeout");
-    loseLife(CONFIG.timeoutCost);
+    if (G.shields > 0) {
+      G.shields--;
+      addFloat("Too slow · shield blocked it", "reward");
+    } else {
+      addFloat(G.lives === 1 ? "Too slow" : `Too slow · −${CONFIG.timeoutCost} life`, "bad");
+      loseLife(CONFIG.timeoutCost);
+    }
     bump();
     later(advance, 650);
   };
@@ -391,10 +433,122 @@ export default function Game() {
   const resume = () => {
     if (G.phase !== "paused") return;
     const elapsedFrac = 1 - G.pausedRemaining;
-    G.wordStart = Date.now() - elapsedFrac * G.limit * 1000;
+    G.wordStart = Date.now() - elapsedFrac * G.wordLimit * 1000;
+    G.frozen = false; // pausing uses up what was left of a Freeze
     G.phase = "playing";
     focusInput();
     runClock(G.pausedRemaining);
+    bump();
+  };
+
+  /* ---------- rewards & power-ups ---------- */
+  const checkRewards = () => {
+    while (G.score >= G.nextRewardAt) {
+      G.rewardsEarned++;
+      G.nextRewardAt = rewardThreshold(G.rewardsEarned);
+      if (G.inventory.length < REWARDS.bucketSize) {
+        const id = rollPowerUp();
+        G.inventory.push(id);
+        later(() => addFloat(`New power-up: ${POWERUPS[id].name}`, "reward"), 280);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      } else {
+        later(() => addFloat("Bucket full · reward lost", "bad"), 280);
+      }
+    }
+  };
+
+  /** Seconds left on the current word's clock. */
+  const remainingSeconds = () =>
+    G.frozen || G.phase === "paused"
+      ? G.pausedRemaining * G.wordLimit
+      : Math.max(0, G.wordLimit - (Date.now() - G.wordStart) / 1000);
+
+  /** Restart the clock with `seconds` left out of the word's (possibly new) limit. */
+  const setClock = (seconds: number) => {
+    const frac = Math.min(1, seconds / G.wordLimit);
+    if (G.frozen) {
+      G.pausedRemaining = frac;
+      fuse.setValue(frac);
+    } else {
+      G.wordStart = Date.now() - (1 - frac) * G.wordLimit * 1000;
+      runClock(frac);
+    }
+  };
+
+  /** Applies a power-up. Returns a message if it can't be used right now (it stays in the bucket). */
+  const applyPowerUp = (id: PowerUpId): string | null => {
+    switch (id) {
+      case "life": {
+        if (G.lives >= MAX_LIVES) return "Lives are full";
+        G.lives++;
+        const p = pips[G.lives - 1];
+        p.setValue(1.8);
+        Animated.spring(p, { toValue: 1, friction: 4, useNativeDriver: true }).start();
+        return null;
+      }
+      case "refill":
+        G.frozen = false;
+        setClock(G.wordLimit);
+        return null;
+      case "skip":
+        G.phase = "between";
+        G.look = "skipped";
+        G.wrongAt = null;
+        fuse.stopAnimation();
+        later(advance, 220);
+        return null;
+      case "slow": {
+        const slowLimit = G.limit * REWARDS.slowFactor;
+        if (G.wordLimit >= slowLimit) {
+          G.slowWords += REWARDS.slowWords; // this word is already slowed; extend to more words
+        } else {
+          const left = remainingSeconds() + (slowLimit - G.wordLimit);
+          G.wordLimit = slowLimit;
+          G.slowWords += REWARDS.slowWords - 1; // the current word is the first of them
+          setClock(left);
+        }
+        return null;
+      }
+      case "shield":
+        G.shields++;
+        return null;
+      case "freeze": {
+        if (G.frozen) return "Clock is already frozen";
+        const frac = remainingSeconds() / G.wordLimit;
+        fuse.stopAnimation();
+        fuse.setValue(frac);
+        G.pausedRemaining = frac;
+        G.frozen = true;
+        const wordId = G.wordId;
+        later(() => {
+          if (!G.frozen || G.wordId !== wordId || G.phase !== "playing") return;
+          G.frozen = false;
+          setClock(G.pausedRemaining * G.wordLimit);
+          bump();
+        }, REWARDS.freezeSeconds * 1000);
+        return null;
+      }
+      case "double":
+        G.doubleWords += REWARDS.doubleWords;
+        return null;
+    }
+  };
+
+  const activatePowerUp = (slot: number) => {
+    if (G.phase !== "playing") return;
+    const id = G.inventory[slot];
+    if (!id) return;
+    const blocked = applyPowerUp(id);
+    if (blocked) {
+      addFloat(blocked, "bad");
+    } else {
+      G.inventory.splice(slot, 1);
+      G.powerUpsUsed++;
+      addFloat(POWERUPS[id].name, "reward");
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+      play("round");
+    }
+    focusInput();
     bump();
   };
 
@@ -412,7 +566,10 @@ export default function Game() {
     if (t.length > prev.length) added = t.startsWith(prev) ? t.slice(prev.length) : t.slice(-1);
     lastText.current = t;
     if (G.phase === "paused" && added) resume();
-    for (const ch of added) handleChar(ch);
+    for (const ch of added) {
+      if (ch >= "1" && ch <= String(REWARDS.bucketSize)) activatePowerUp(Number(ch) - 1);
+      else handleChar(ch);
+    }
     if (t.length > 40) resetInput();
   };
   const onSubmit = () => {
@@ -423,6 +580,7 @@ export default function Game() {
   /* ---------- render ---------- */
   const total = wordsInRound(G.round);
   const oneLife = G.d.lives === 1;
+  const showNoLives = oneLife && G.lives <= 1; // Impossible, unless an Extra Life was used
   const low = !oneLife && G.lives > 0 && G.lives <= Math.ceil(G.d.lives * 0.3);
   const bestHere = best[G.d.id];
   const fontSize = currentFontSize();
@@ -457,11 +615,11 @@ export default function Game() {
         </View>
       </View>
       <View style={s.livesRow}>
-        <Text style={[s.label, (low || oneLife) && { color: c.miss }]}>
-          {oneLife ? "NO LIVES · ONE MISS ENDS IT" : `LIVES ${G.lives}`}
+        <Text style={[s.label, (low || showNoLives) && { color: c.miss }]}>
+          {showNoLives ? "NO LIVES · ONE MISS ENDS IT" : `LIVES ${G.lives}`}
         </Text>
-        <View style={[s.pips, oneLife && { display: "none" }]}>
-          {pips.slice(0, G.d.lives).map((p, i) => {
+        <View style={[s.pips, showNoLives && { display: "none" }]}>
+          {pips.slice(0, Math.max(G.d.lives, G.lives)).map((p, i) => {
             const lost = i >= G.lives;
             return (
               <Animated.View
@@ -490,7 +648,7 @@ export default function Game() {
               key={f.id}
               style={[
                 s.float,
-                { color: f.kind === "good" ? c.good : c.miss },
+                { color: f.kind === "good" ? c.good : f.kind === "reward" ? c.accent : c.miss },
                 {
                   opacity: f.anim.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
                   transform: [
@@ -517,6 +675,7 @@ export default function Game() {
               if (wrong) color = c.miss;
               if (G.look === "solved") color = c.good;
               if (G.look === "timedOut") color = c.miss;
+              if (G.look === "skipped") color = c.muted;
               return (
                 <Animated.View
                   key={i}
@@ -553,7 +712,8 @@ export default function Game() {
           </View>
           <View style={s.fuseRow}>
             <Text style={s.meta}>
-              Time per word <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{formatSeconds(G.limit)}</Text>
+              Time per word <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{formatSeconds(G.phase === "banner" || G.phase === "title" ? G.limit : G.wordLimit)}
+              </Text>
             </Text>
             <Remaining G={G} style={s.meta} />
           </View>
@@ -569,6 +729,8 @@ export default function Game() {
               : " "}
         </Text>
       </Pressable>
+
+      <PowerUpTray c={c} G={G} onUse={activatePowerUp} />
 
       <View style={s.controls}>
         <Pressable style={s.chip} onPress={() => (G.phase === "paused" ? resume() : pause())} hitSlop={8}>
@@ -651,6 +813,11 @@ export default function Game() {
             }
           />
           <Rule c={c} k="ROUNDS" v="Ten words a round. The clock gets shorter every round, and late rounds get longer." />
+          <Rule
+            c={c}
+            k="REWARDS"
+            v="Score points to earn power-ups like extra lives, more time and skips. Hold up to 3 and tap one to use it. While your bucket is full, new rewards are lost."
+          />
           <Btn c={c} label={`Start ${G.d.label}`} onPress={startGame} />
         </Overlay>
       )}
@@ -701,6 +868,84 @@ export default function Game() {
           <Btn c={c} label="Play again" onPress={startGame} />
           <Btn c={c} label="Change difficulty" onPress={toTitle} secondary />
         </Overlay>
+      )}
+    </View>
+  );
+}
+
+function powerUpColor(c: Palette, id: PowerUpId): string {
+  return {
+    life: c.miss,
+    refill: c.accent,
+    skip: c.ink,
+    slow: c.good,
+    shield: c.violet,
+    freeze: c.ice,
+    double: c.gold,
+  }[id];
+}
+
+/** The 3-slot power-up bucket, what the next reward needs, and which effects are running. */
+function PowerUpTray({ c, G, onUse }: { c: Palette; G: GameState; onUse: (slot: number) => void }) {
+  const s = styles(c);
+  const full = G.inventory.length >= REWARDS.bucketSize;
+  const canUse = G.phase === "playing";
+  const slowLeft = G.slowWords + (G.wordLimit > G.limit && G.phase !== "banner" ? 1 : 0);
+  const active: { text: string; color: string }[] = [];
+  if (G.frozen) active.push({ text: "Frozen", color: c.ice });
+  if (G.shields > 0) active.push({ text: G.shields > 1 ? `Shield ×${G.shields}` : "Shield on", color: c.violet });
+  if (slowLeft > 0) active.push({ text: `Slow-Mo · ${slowLeft} word${slowLeft > 1 ? "s" : ""}`, color: c.good });
+  if (G.doubleWords > 0) active.push({ text: `2× points · ${G.doubleWords} word${G.doubleWords > 1 ? "s" : ""}`, color: c.gold });
+
+  return (
+    <View style={s.tray}>
+      <View style={s.trayHead}>
+        <Text style={s.label}>POWER-UPS</Text>
+        <Text style={[s.meta, full && { color: c.miss }]} numberOfLines={1}>
+          {full ? "Bucket full · use one to earn more" : `Next at ${G.nextRewardAt.toLocaleString()} pts`}
+        </Text>
+      </View>
+      <View style={s.slots}>
+        {Array.from({ length: REWARDS.bucketSize }, (_, i) => {
+          const id = G.inventory[i];
+          if (!id)
+            return (
+              <View key={i} style={[s.slot, s.slotEmpty]}>
+                <Text style={s.slotEmptyText}>Empty</Text>
+              </View>
+            );
+          const color = powerUpColor(c, id);
+          return (
+            <Pressable
+              key={i}
+              onPress={() => onUse(i)}
+              disabled={!canUse}
+              style={({ pressed }) => [
+                s.slot,
+                { borderColor: color, opacity: canUse ? 1 : 0.5 },
+                pressed && { transform: [{ scale: 0.96 }] },
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={`Use ${POWERUPS[id].name}: ${POWERUPS[id].effect}`}
+            >
+              <Text style={[s.slotName, { color }]} numberOfLines={1}>
+                {POWERUPS[id].name}
+              </Text>
+              <Text style={s.slotEffect} numberOfLines={2}>
+                {POWERUPS[id].effect}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </View>
+      {active.length > 0 && (
+        <View style={s.activeRow}>
+          {active.map(a => (
+            <View key={a.text} style={[s.activeChip, { borderColor: a.color }]}>
+              <Text style={[s.activeText, { color: a.color }]}>{a.text}</Text>
+            </View>
+          ))}
+        </View>
       )}
     </View>
   );
@@ -770,8 +1015,9 @@ function Remaining({ G, style }: { G: GameState; style: object }) {
     return () => clearInterval(id);
   }, []);
   let remaining = G.limit;
-  if (G.phase === "playing") remaining = Math.max(0, G.limit - (Date.now() - G.wordStart) / 1000);
-  else if (G.phase === "paused") remaining = G.pausedRemaining * G.limit;
+  if (G.phase === "playing" && G.frozen) remaining = G.pausedRemaining * G.wordLimit;
+  else if (G.phase === "playing") remaining = Math.max(0, G.wordLimit - (Date.now() - G.wordStart) / 1000);
+  else if (G.phase === "paused") remaining = G.pausedRemaining * G.wordLimit;
   else if (G.phase === "between" || G.phase === "over") remaining = 0;
   return <Text style={[style, { fontVariant: ["tabular-nums"] }]}>{remaining.toFixed(1)}s</Text>;
 }
@@ -855,7 +1101,7 @@ function make(c: Palette) {
     letterBox: { alignItems: "center", borderRadius: 8, paddingHorizontal: 1 },
     letter: { fontFamily: fonts.word, includeFontPadding: false },
     underline: { alignSelf: "stretch", marginHorizontal: "8%", borderRadius: 2, marginTop: 2 },
-    float: { position: "absolute", top: -34, fontFamily: fonts.display, fontSize: 22 },
+    float: { position: "absolute", top: -34, width: 340, textAlign: "center", fontFamily: fonts.display, fontSize: 22 },
 
     fuse: { width: "100%", maxWidth: 560, gap: 8 },
     fuseTrack: { height: 10, borderRadius: 999, backgroundColor: c.line, overflow: "hidden" },
@@ -864,6 +1110,26 @@ function make(c: Palette) {
     fuseRow: { flexDirection: "row", justifyContent: "space-between" },
     hint: { fontFamily: fonts.body, fontSize: 13, color: c.muted, textAlign: "center" },
 
+    tray: { gap: 6, marginBottom: 10 },
+    trayHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", gap: 10 },
+    slots: { flexDirection: "row", gap: 8 },
+    slot: {
+      flex: 1,
+      minHeight: 56,
+      borderWidth: 1.5,
+      borderRadius: 12,
+      paddingHorizontal: 8,
+      paddingVertical: 7,
+      backgroundColor: c.surface,
+      gap: 1,
+    },
+    slotEmpty: { borderStyle: "dashed", borderColor: c.line, backgroundColor: "transparent", alignItems: "center", justifyContent: "center" },
+    slotEmptyText: { fontFamily: fonts.body, fontSize: 12, color: c.ghost },
+    slotName: { fontFamily: fonts.display, fontSize: 15 },
+    slotEffect: { fontFamily: fonts.body, fontSize: 11, lineHeight: 14, color: c.muted },
+    activeRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+    activeChip: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 },
+    activeText: { fontFamily: fonts.bodyStrong, fontSize: 11 },
     controls: { flexDirection: "row", justifyContent: "center", gap: 10 },
     chip: { borderWidth: 1, borderColor: c.line, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
     chipText: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1, color: c.muted },
