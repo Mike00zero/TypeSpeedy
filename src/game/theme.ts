@@ -8,6 +8,7 @@ export type Palette = {
   ghost: string;
   line: string;
   accent: string;
+  accentSoft: string;
   onAccent: string;
   good: string;
   miss: string;
@@ -23,6 +24,7 @@ const light: Palette = {
   ghost: "#A9B2C6",
   line: "#D6DCE8",
   accent: "#2A47F5",
+  accentSoft: "rgba(42, 71, 245, 0.08)",
   onAccent: "#FFFFFF",
   good: "#0F8F68",
   miss: "#E3223A",
@@ -38,6 +40,7 @@ const dark: Palette = {
   ghost: "#475069",
   line: "#262D45",
   accent: "#7D93FF",
+  accentSoft: "rgba(125, 147, 255, 0.12)",
   onAccent: "#0C1020",
   good: "#3BD39E",
   miss: "#FF4A5C",
