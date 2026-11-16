@@ -103,15 +103,12 @@ export default function Game() {
   const { width } = useWindowDimensions();
   // Width of the play area, measured on layout; the screen width minus the side padding until then.
   const [stageWidth, setStageWidth] = useState(width - 36);
-  // Each new word is first laid out off-screen at a reference size with no width limit, and its
-  // real width is measured. The visible word is then sized from that measurement so it always fits,
-  // and stays hidden until the measurement is in, so an overflow never shows.
-  const [probe, setProbe] = useState<{ word: string; widthPerPx: number } | null>(null);
-  // After that, the visible word itself is checked: `override` lowers its size if it still runs
-  // past the edge, and `fitOk` records the size at which it was confirmed to fit.
-  type SizeFor = { word: string; stageWidth: number; size: number };
-  const [override, setOverride] = useState<SizeFor | null>(null);
-  const [fitOk, setFitOk] = useState<SizeFor | null>(null);
+  // How wide one letter of the word font is (per px of font size) on this device, measured once
+  // from an off-screen sample. Starts from the font's published width until the sample is in.
+  const [glyphPerPx, setGlyphPerPx] = useState(MONO_ADVANCE);
+  // Read by nextWord(), which can run from a timer set during an earlier render.
+  const sizing = useRef({ stageWidth, glyphPerPx });
+  sizing.current = { stageWidth, glyphPerPx };
 
   const G = useRef<GameState>(freshState(DIFFICULTIES.medium)).current;
   const [, setVersion] = useState(0);
@@ -180,38 +177,10 @@ export default function Game() {
   };
 
   /* ---------- effects ---------- */
-  const measured = () => (probe !== null && probe.word === G.word ? probe : null);
-  const currentFontSize = () => {
-    const m = measured();
-    const len = G.word.length || 8;
-    let size: number;
-    if (!m) size = wordFontSize(len, stageWidth); // estimate, only used while hidden
-    else {
-      const usable = stageWidth - WORD_MARGIN - len * LETTER_PAD;
-      size = Math.max(MIN_WORD_FONT, Math.min(MAX_WORD_FONT, Math.floor(usable / m.widthPerPx)));
-    }
-    // The on-screen check below can only lower the size further.
-    const o = override;
-    if (o && o.word === G.word && o.stageWidth === stageWidth) size = Math.min(size, o.size);
-    return size;
-  };
-
-  // Second check, on the word actually shown: where does its last letter end?
-  const onLastLetterLayout = (x: number, w: number, size: number) => {
-    const contentWidth = x + w;
-    const avail = stageWidth - WORD_MARGIN;
-    if (contentWidth > avail + 0.5 && size > MIN_WORD_FONT) {
-      const next = Math.max(MIN_WORD_FONT, Math.min(size - 1, Math.floor((size * avail) / contentWidth)));
-      setOverride({ word: G.word, stageWidth, size: next });
-    } else if (!(fitOk && fitOk.word === G.word && fitOk.size === size && fitOk.stageWidth === stageWidth)) {
-      setFitOk({ word: G.word, stageWidth, size });
-    }
-  };
-  const charWidth = () => {
-    const m = measured();
-    const size = currentFontSize();
-    return (m ? (m.widthPerPx * size) / G.word.length : size * 0.6) + LETTER_PAD;
-  };
+  // Words are drawn as large as fits, but never below MIN_READABLE_FONT; words that would need
+  // to go smaller are never picked (see maxLettersAt).
+  const currentFontSize = () => wordFontSize(G.word.length || 8, stageWidth, glyphPerPx);
+  const charWidth = () => currentFontSize() * glyphPerPx + LETTER_PAD;
 
   const addFloat = (text: string, kind: Float["kind"], letterIndex?: number) => {
     const id = ++floatId.current;
@@ -309,7 +278,7 @@ export default function Game() {
   };
 
   const nextWord = () => {
-    G.word = pickWord(G.d.lengths(G.round), G.recent);
+    G.word = pickWord(G.d.lengths(G.round), G.recent, maxLettersAt(sizing.current.stageWidth, sizing.current.glyphPerPx));
     G.recent.push(G.word);
     if (G.recent.length > 40) G.recent.shift();
     G.pos = 0;
@@ -457,13 +426,6 @@ export default function Game() {
   const low = !oneLife && G.lives > 0 && G.lives <= Math.ceil(G.d.lives * 0.3);
   const bestHere = best[G.d.id];
   const fontSize = currentFontSize();
-  const wordReady =
-    G.word === "" ||
-    (measured() !== null &&
-      fitOk !== null &&
-      fitOk.word === G.word &&
-      fitOk.size === fontSize &&
-      fitOk.stageWidth === stageWidth);
   const hotOpacity = fuse.interpolate({ inputRange: [0, 0.3, 0.31, 1], outputRange: [1, 1, 0, 0] });
   const accuracy = G.keys ? `${Math.round((G.goodKeys / G.keys) * 100)}%` : "–";
   const prevLimit = G.round > 1 ? timeForRound(G.round - 1, G.d) : G.limit;
@@ -542,8 +504,7 @@ export default function Game() {
             </Animated.Text>
           ))}
           <Animated.View
-            key={`${G.wordId}-${G.word}`} // fresh layout (and fit check) for every word
-            style={[s.word, { opacity: wordReady ? 1 : 0, transform: [{ translateX: shake }] }]}
+            style={[s.word, { transform: [{ translateX: shake }] }]}
             accessibilityLabel={`Word ${G.word}`}
           >
             {[...G.word].map((ch, i) => {
@@ -559,11 +520,6 @@ export default function Game() {
               return (
                 <Animated.View
                   key={i}
-                  onLayout={
-                    i === G.word.length - 1
-                      ? e => onLastLetterLayout(e.nativeEvent.layout.x, e.nativeEvent.layout.width, fontSize)
-                      : undefined
-                  }
                   style={[
                     s.letterBox,
                     wrong && { backgroundColor: c.missSoft },
@@ -642,19 +598,18 @@ export default function Game() {
         accessibilityLabel="Type here"
       />
 
-      {/* Off-screen measuring copy of the word (see `probe`) */}
+      {/* Off-screen sample of the word font, measured once (see glyphPerPx) */}
       <View style={s.probe} pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
         <Text
-          key={G.word}
           style={[s.letter, { fontSize: PROBE_FONT }]}
           allowFontScaling={false}
           numberOfLines={1}
           onLayout={e => {
             const w = e.nativeEvent.layout.width;
-            if (w > 0) setProbe({ word: G.word, widthPerPx: w / PROBE_FONT });
+            if (w > 0) setGlyphPerPx(w / (PROBE_TEXT.length * PROBE_FONT));
           }}
         >
-          {G.word}
+          {PROBE_TEXT}
         </Text>
       </View>
 
@@ -786,18 +741,25 @@ function DifficultyCard({
 
 /* ---------- small components ---------- */
 
-// IBM Plex Mono advances 0.6em per glyph; 0.62 leaves a little room for rounding.
+// IBM Plex Mono advances 0.6em per glyph; 0.62 is a safe starting estimate until measured.
 const MONO_ADVANCE = 0.62;
 const LETTER_PAD = 2; // letterBox paddingHorizontal, both sides
 const WORD_MARGIN = 8; // breathing room so the shake doesn't touch the edges
-const MIN_WORD_FONT = 10;
 const MAX_WORD_FONT = 76;
-const PROBE_FONT = 100; // reference size for measuring a word's width
+/** Words never draw smaller than this; longer words that wouldn't fit at it are left out. */
+const MIN_READABLE_FONT = 40;
+const PROBE_FONT = 100; // size of the off-screen font sample
+const PROBE_TEXT = "mmmmmmmmmm";
 
-/** Largest font size (up to 76) at which a word of `len` letters fits in `availWidth`. */
-function wordFontSize(len: number, availWidth: number) {
+/** Largest font size (MIN_READABLE_FONT to MAX_WORD_FONT) at which a word of `len` letters fits. */
+function wordFontSize(len: number, availWidth: number, glyphPerPx: number) {
   const usable = availWidth - WORD_MARGIN - len * LETTER_PAD;
-  return Math.max(MIN_WORD_FONT, Math.min(MAX_WORD_FONT, Math.floor(usable / (len * MONO_ADVANCE))));
+  return Math.max(MIN_READABLE_FONT, Math.min(MAX_WORD_FONT, Math.floor(usable / (len * glyphPerPx))));
+}
+
+/** Most letters that fit across the play area at MIN_READABLE_FONT. */
+function maxLettersAt(availWidth: number, glyphPerPx: number) {
+  return Math.max(3, Math.floor((availWidth - WORD_MARGIN) / (MIN_READABLE_FONT * glyphPerPx + LETTER_PAD)));
 }
 
 /** Seconds left on the clock, ticking on its own so the whole game doesn't re-render. */
@@ -907,7 +869,7 @@ function make(c: Palette) {
     chipText: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1, color: c.muted },
 
     hiddenInput: { position: "absolute", width: 1, height: 1, opacity: 0, left: -10, top: 0 },
-    // Wide enough that no word is ever clipped; parked above the screen.
+    // Wide enough that the sample is never clipped; parked above the screen.
     probe: { position: "absolute", top: -2000, left: 0, width: 5000, alignItems: "flex-start", opacity: 0 },
     flash: { borderWidth: 8, borderColor: c.miss, backgroundColor: c.missSoft },
 

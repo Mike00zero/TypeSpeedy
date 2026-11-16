@@ -13,10 +13,17 @@ photosynthesis transformation responsibility multiplication congratulations extr
 
 export const WORDS = Array.from(new Set(RAW.split(/\s+/).filter(Boolean)));
 
-/** Picks a random word within a length range, avoiding recently used words. */
-export function pickWord([min, max]: [number, number], recent: string[]): string {
-  let pool = WORDS.filter(w => w.length >= min && w.length <= max && !recent.includes(w));
-  if (pool.length === 0) pool = WORDS.filter(w => w.length >= min && w.length <= max);
-  if (pool.length === 0) pool = WORDS;
+/**
+ * Picks a random word within a length range, avoiding recently used words.
+ * `maxLetters` is the longest word that fits on this screen; the range is capped to it.
+ */
+export function pickWord(range: [number, number], recent: string[], maxLetters = Infinity): string {
+  let [min, max] = range;
+  max = Math.min(max, maxLetters);
+  if (min > max) min = Math.max(3, max - 2); // tiny screen: take the longest words that fit
+  const inRange = WORDS.filter(w => w.length >= min && w.length <= max);
+  let pool = inRange.filter(w => !recent.includes(w));
+  if (pool.length === 0) pool = inRange;
+  if (pool.length === 0) pool = WORDS.filter(w => w.length <= maxLetters);
   return pool[Math.floor(Math.random() * pool.length)];
 }
