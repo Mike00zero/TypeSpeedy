@@ -1,31 +1,119 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+import { EMPTY_LIFETIME, pruneUnlocked, type LifetimeStats, type Unlocked } from "./achievements";
 import { DIFFICULTY_ORDER, type DifficultyId } from "./config";
+import { PACK_BY_ID, THEME_BY_ID, type PackId, type ThemeId } from "./unlocks";
+import { EMPTY_TOWER, type TowerProgress } from "./tower";
+import { EMPTY_SPRINT, MODE_BY_ID, type GameMode, type SprintBest } from "./modes";
 
 const BEST = "typespeedy.best"; // per difficulty: typespeedy.best.easy, ...
 const LEGACY_BEST = "typespeedy.best"; // before difficulties existed (counts as medium)
 const MUTED = "typespeedy.muted";
+const MUSIC = "typespeedy.music";
 const DIFFICULTY = "typespeedy.difficulty";
+const THEME = "typespeedy.theme";
+const PACK = "typespeedy.pack";
+const HAPTICS = "typespeedy.haptics";
+const EFFECTS = "typespeedy.effects"; // screen shake and red flash on a miss
+const MODE = "typespeedy.mode";
+const TOWER_KEY = "typespeedy.tower";
+const SPRINT_KEY = "typespeedy.sprint";
 
 export type BestScores = Record<DifficultyId, number>;
 
-export async function loadPrefs(): Promise<{ best: BestScores; muted: boolean; difficulty: DifficultyId }> {
+type Prefs = {
+  best: BestScores;
+  muted: boolean;
+  music: boolean;
+  difficulty: DifficultyId;
+  theme: ThemeId;
+  pack: PackId;
+  haptics: boolean;
+  effects: boolean;
+  mode: GameMode;
+};
+
+export async function loadPrefs(): Promise<Prefs> {
   const best: BestScores = { easy: 0, medium: 0, hard: 0, impossible: 0 };
   try {
-    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, DIFFICULTY];
+    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, MUSIC, DIFFICULTY, THEME, PACK, HAPTICS, EFFECTS, MODE];
     const pairs = await AsyncStorage.multiGet(keys);
     const get = (k: string) => pairs.find(([key]) => key === k)?.[1] ?? null;
     for (const d of DIFFICULTY_ORDER) best[d] = Number(get(`${BEST}.${d}`)) || 0;
     best.medium = Math.max(best.medium, Number(get(LEGACY_BEST)) || 0);
     const saved = get(DIFFICULTY) as DifficultyId | null;
+    const theme = get(THEME) as ThemeId | null;
+    const pack = get(PACK) as PackId | null;
     return {
       best,
       muted: get(MUTED) === "1",
+      music: get(MUSIC) !== "0", // on unless turned off
       difficulty: saved && DIFFICULTY_ORDER.includes(saved) ? saved : "medium",
+      theme: theme && THEME_BY_ID[theme] ? theme : "classic",
+      pack: pack && PACK_BY_ID[pack] ? pack : "classic",
+      haptics: get(HAPTICS) !== "0", // on unless turned off
+      effects: get(EFFECTS) !== "0",
+      mode: MODE_BY_ID[get(MODE) as GameMode] ? (get(MODE) as GameMode) : "classic",
     };
   } catch {
-    return { best, muted: false, difficulty: "medium" };
+    return { best, muted: false, music: true, difficulty: "medium", theme: "classic", pack: "classic", haptics: true, effects: true, mode: "classic" };
   }
+}
+
+export function saveMode(mode: GameMode) {
+  AsyncStorage.setItem(MODE, mode).catch(() => {});
+}
+
+export async function loadTower(): Promise<TowerProgress> {
+  try {
+    const t = await AsyncStorage.getItem(TOWER_KEY);
+    return t ? { ...EMPTY_TOWER, ...(JSON.parse(t) as Partial<TowerProgress>) } : EMPTY_TOWER;
+  } catch {
+    return EMPTY_TOWER;
+  }
+}
+
+export async function loadSprint(): Promise<SprintBest> {
+  try {
+    const t = await AsyncStorage.getItem(SPRINT_KEY);
+    return t ? { ...EMPTY_SPRINT, ...(JSON.parse(t) as Partial<SprintBest>) } : EMPTY_SPRINT;
+  } catch {
+    return EMPTY_SPRINT;
+  }
+}
+
+export function saveSprint(b: SprintBest) {
+  AsyncStorage.setItem(SPRINT_KEY, JSON.stringify(b)).catch(() => {});
+}
+
+export function saveTower(t: TowerProgress) {
+  AsyncStorage.setItem(TOWER_KEY, JSON.stringify(t)).catch(() => {});
+}
+
+export function saveHaptics(on: boolean) {
+  AsyncStorage.setItem(HAPTICS, on ? "1" : "0").catch(() => {});
+}
+
+export function saveEffects(on: boolean) {
+  AsyncStorage.setItem(EFFECTS, on ? "1" : "0").catch(() => {});
+}
+
+/** Settings > Reset stats: best scores, lifetime totals and Tower progress. Today's Daily try stays used. */
+export function resetStats() {
+  AsyncStorage.multiRemove([...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, LIFETIME_KEY, TOWER_KEY, SPRINT_KEY]).catch(() => {});
+}
+
+/** Settings > Reset achievements (themes and word packs they unlocked go back to Classic). */
+export function resetAchievements() {
+  AsyncStorage.multiRemove([ACHIEVEMENTS_KEY, THEME, PACK]).catch(() => {});
+}
+
+export function saveTheme(theme: ThemeId) {
+  AsyncStorage.setItem(THEME, theme).catch(() => {});
+}
+
+export function savePack(pack: PackId) {
+  AsyncStorage.setItem(PACK, pack).catch(() => {});
 }
 
 export function saveBest(difficulty: DifficultyId, score: number) {
@@ -38,4 +126,76 @@ export function saveMuted(muted: boolean) {
 
 export function saveDifficulty(difficulty: DifficultyId) {
   AsyncStorage.setItem(DIFFICULTY, difficulty).catch(() => {});
+}
+
+export function saveMusic(on: boolean) {
+  AsyncStorage.setItem(MUSIC, on ? "1" : "0").catch(() => {});
+}
+
+/* ---------- Daily Challenge ---------- */
+
+const DAILY = "typespeedy.daily"; // the most recent daily attempt
+const DAILY_STREAK = "typespeedy.dailyStreak";
+
+export type DailyRecord = {
+  date: string; // "2026-11-16"
+  score: number;
+  round: number;
+  finished: boolean; // false while the run is in progress (or if the app closed mid-run)
+};
+
+export type DailyStreak = { count: number; lastDate: string };
+
+export async function loadDaily(): Promise<{ record: DailyRecord | null; streak: DailyStreak }> {
+  try {
+    const [r, s] = await Promise.all([AsyncStorage.getItem(DAILY), AsyncStorage.getItem(DAILY_STREAK)]);
+    return {
+      record: r ? (JSON.parse(r) as DailyRecord) : null,
+      streak: s ? (JSON.parse(s) as DailyStreak) : { count: 0, lastDate: "" },
+    };
+  } catch {
+    return { record: null, streak: { count: 0, lastDate: "" } };
+  }
+}
+
+export function saveDaily(record: DailyRecord) {
+  AsyncStorage.setItem(DAILY, JSON.stringify(record)).catch(() => {});
+}
+
+export function saveDailyStreak(streak: DailyStreak) {
+  AsyncStorage.setItem(DAILY_STREAK, JSON.stringify(streak)).catch(() => {});
+}
+
+/* ---------- Achievements ---------- */
+
+const ACHIEVEMENTS_KEY = "typespeedy.achievements"; // id -> date unlocked
+const LIFETIME_KEY = "typespeedy.lifetime"; // totals across every game
+
+export async function loadAchievements(): Promise<{ unlocked: Unlocked; lifetime: LifetimeStats }> {
+  try {
+    const [a, l] = await Promise.all([AsyncStorage.getItem(ACHIEVEMENTS_KEY), AsyncStorage.getItem(LIFETIME_KEY)]);
+    return {
+      unlocked: a ? pruneUnlocked(JSON.parse(a) as Unlocked) : {},
+      lifetime: l ? mergeLifetime(JSON.parse(l) as Partial<LifetimeStats>) : EMPTY_LIFETIME,
+    };
+  } catch {
+    return { unlocked: {}, lifetime: EMPTY_LIFETIME };
+  }
+}
+
+/** Fills in fields an older save doesn't have. */
+function mergeLifetime(saved: Partial<LifetimeStats>): LifetimeStats {
+  return {
+    ...EMPTY_LIFETIME,
+    ...saved,
+    gamesByDifficulty: { ...EMPTY_LIFETIME.gamesByDifficulty, ...saved.gamesByDifficulty },
+  };
+}
+
+export function saveAchievements(unlocked: Unlocked) {
+  AsyncStorage.setItem(ACHIEVEMENTS_KEY, JSON.stringify(unlocked)).catch(() => {});
+}
+
+export function saveLifetime(lifetime: LifetimeStats) {
+  AsyncStorage.setItem(LIFETIME_KEY, JSON.stringify(lifetime)).catch(() => {});
 }

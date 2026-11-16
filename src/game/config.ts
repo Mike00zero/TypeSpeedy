@@ -109,3 +109,27 @@ export function formatSeconds(s: number): string {
 function round2(n: number) {
   return Math.round(n * 100) / 100;
 }
+
+/* ---------- combo streaks ---------- */
+
+/**
+ * Finishing words with no wrong letters builds a streak; a wrong letter or a timeout resets it.
+ * The streak sets a points multiplier: reach `at` words in a row to get `mult`.
+ */
+export const COMBO_TIERS = [
+  { at: 3, mult: 1.5 },
+  { at: 6, mult: 2 },
+  { at: 10, mult: 3 },
+  { at: 15, mult: 4 },
+];
+
+export function comboMultiplier(streak: number): number {
+  let mult = 1;
+  for (const t of COMBO_TIERS) if (streak >= t.at) mult = t.mult;
+  return mult;
+}
+
+/** The next tier above the current streak, or null at the cap. */
+export function nextComboTier(streak: number): { at: number; mult: number } | null {
+  return COMBO_TIERS.find(t => t.at > streak) ?? null;
+}

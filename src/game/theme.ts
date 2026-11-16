@@ -14,6 +14,9 @@ export type Palette = {
   miss: string;
   missSoft: string;
   scrim: string;
+  gold: string;
+  ice: string;
+  violet: string;
 };
 
 const light: Palette = {
@@ -30,6 +33,9 @@ const light: Palette = {
   miss: "#E3223A",
   missSoft: "rgba(227, 34, 58, 0.14)",
   scrim: "rgba(238, 241, 247, 0.9)",
+  gold: "#B07612",
+  ice: "#0B87AE",
+  violet: "#7A3FE0",
 };
 
 const dark: Palette = {
@@ -46,7 +52,34 @@ const dark: Palette = {
   miss: "#FF4A5C",
   missSoft: "rgba(255, 74, 92, 0.18)",
   scrim: "rgba(12, 16, 32, 0.9)",
+  gold: "#F2C14E",
+  ice: "#5CC8EC",
+  violet: "#B595FF",
 };
+
+/** Boss fights: one dark ember-and-crimson look, whatever the system theme. */
+export const bossPalette: Palette = {
+  bg: "#12060A",
+  surface: "#1E0B11",
+  ink: "#F7E8EA",
+  muted: "#B48A93",
+  ghost: "#5C3741",
+  line: "#3B1A22",
+  accent: "#FF7A2F",
+  accentSoft: "rgba(255, 122, 47, 0.14)",
+  onAccent: "#12060A",
+  good: "#FFB547",
+  miss: "#FF3355",
+  missSoft: "rgba(255, 51, 85, 0.2)",
+  scrim: "rgba(18, 6, 10, 0.92)",
+  gold: "#F2C14E",
+  ice: "#5CC8EC",
+  violet: "#C9A8FF",
+};
+
+/** The Classic theme's two looks (it follows the phone's light or dark mode). */
+export const lightPalette = light;
+export const darkPalette = dark;
 
 export const fonts = {
   display: "BricolageGrotesque_800ExtraBold",

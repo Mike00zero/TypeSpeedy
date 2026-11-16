@@ -19,13 +19,27 @@ export const WORDS = Array.from(new Set(RAW.split(/\s+/).filter(Boolean)));
  * Picks a random word within a length range, avoiding recently used words.
  * The range is capped to MAX_WORD_LENGTH and to `maxLetters`, the longest word that fits on this screen.
  */
-export function pickWord(range: [number, number], recent: string[], maxLetters = Infinity): string {
+export function pickWord(
+  range: [number, number],
+  recent: string[],
+  maxLetters = Infinity,
+  random: () => number = Math.random,
+  pack: string[] | null = null, // a word pack to draw from instead of the standard list
+): string {
   let [min, max] = range;
   max = Math.min(max, maxLetters, MAX_WORD_LENGTH);
   if (min > max) min = Math.max(3, max - 2); // tiny screen: take the longest words that fit
-  const inRange = WORDS.filter(w => w.length >= min && w.length <= max);
+  const fits = (w: string) => w.length >= min && w.length <= max;
+  let inRange = WORDS.filter(fits);
+  if (pack) {
+    // Word packs are smaller: if one runs short of fresh words at this length, mix in standard words.
+    const fromPack = pack.filter(fits);
+    const fresh = fromPack.filter(w => !recent.includes(w));
+    if (fresh.length >= 8) return fresh[Math.floor(random() * fresh.length)];
+    inRange = Array.from(new Set([...fromPack, ...inRange]));
+  }
   let pool = inRange.filter(w => !recent.includes(w));
   if (pool.length === 0) pool = inRange;
   if (pool.length === 0) pool = WORDS.filter(w => w.length <= Math.min(maxLetters, MAX_WORD_LENGTH));
-  return pool[Math.floor(Math.random() * pool.length)];
+  return pool[Math.floor(random() * pool.length)];
 }
