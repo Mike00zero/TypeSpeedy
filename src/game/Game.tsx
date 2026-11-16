@@ -13,6 +13,7 @@ import {
   ScrollView,
   Share,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   type TextInputInstance,
@@ -22,6 +23,8 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import * as Haptics from "expo-haptics";
+import { buzz, setHapticsEnabled } from "./haptics";
+import appConfig from "../../app.json";
 
 import {
   CONFIG,
@@ -39,6 +42,19 @@ import {
 } from "./config";
 import { pickWord } from "./words";
 import { bossPalette, fonts, usePalette, type Palette } from "./theme";
+import {
+  PACK_BY_ID,
+  THEMES,
+  WORD_PACKS,
+  meetsRequirement,
+  newUnlockables,
+  requirementText,
+  themePalette,
+  type PackId,
+  type Theme,
+  type ThemeId,
+  type WordPack,
+} from "./unlocks";
 import { initSounds, pauseMusic, play, playMusic, playVictory, resumeMusic, setMusicEnabled, setMuted } from "./sound";
 import {
   loadAchievements,
@@ -50,8 +66,14 @@ import {
   saveDailyStreak,
   saveDifficulty,
   saveLifetime,
+  resetAchievements,
+  resetStats,
+  saveEffects,
+  saveHaptics,
   saveMusic,
   saveMuted,
+  savePack,
+  saveTheme,
   type BestScores,
   type DailyRecord,
   type DailyStreak,
@@ -95,6 +117,9 @@ import {
 
 type Phase = "title" | "banner" | "playing" | "between" | "paused" | "over" | "bossReward";
 type WordLook = "normal" | "solved" | "timedOut" | "skipped";
+const APP_VERSION = `v${appConfig.expo.version}`;
+
+type Toast = { eyebrow: string; name: string; desc: string };
 type Float = { id: number; text: string; kind: "good" | "bad" | "reward"; x: number; anim: Animated.Value };
 
 type GameState = {
@@ -146,12 +171,16 @@ type GameState = {
   shieldBlocks: number;
   bucketFilled: boolean;
   fastestLong: number | null; // quickest 7-letter word, in seconds
+  fastestMid: number | null; // quickest word of 5+ letters, in seconds
+  typingSeconds: number; // time spent on words, for the Stats screen
   flawlessBosses: number;
   clutchBosses: number;
   perfectRounds: number;
   roundMisses: number; // wrong letters + timeouts this round (boss included)
   bossMisses: number; // wrong letters + timeouts in this boss fight
   newAchievements: string[]; // names unlocked this game, for the game-over screen
+  newUnlocks: string[]; // themes and word packs unlocked this game
+  pack: string[] | null; // this game's word pack (null = the standard list)
   careerSaved: boolean; // this game's totals were added to the lifetime stats
 };
 
@@ -206,18 +235,33 @@ function freshState(d: Difficulty): GameState {
     shieldBlocks: 0,
     bucketFilled: false,
     fastestLong: null,
+    fastestMid: null,
+    typingSeconds: 0,
     flawlessBosses: 0,
     clutchBosses: 0,
     perfectRounds: 0,
     roundMisses: 0,
     bossMisses: 0,
     newAchievements: [],
+    newUnlocks: [],
+    pack: null,
     careerSaved: true, // nothing to save until a game starts
   };
 }
 
 export default function Game() {
-  const { c: baseColors, isDark } = usePalette();
+  const { isDark: systemDark } = usePalette();
+  const [themeId, setThemeId] = useState<ThemeId>("classic");
+  const [packId, setPackId] = useState<PackId>("classic");
+  const packRef = useRef<PackId>("classic");
+  const [showCustomize, setShowCustomize] = useState(false);
+  const [showStats, setShowStats] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [confirmReset, setConfirmReset] = useState<"stats" | "achievements" | null>(null);
+  const [hapticsOn, setHapticsOn] = useState(true);
+  const [effectsOn, setEffectsOn] = useState(true);
+  const effectsRef = useRef(true); // read by hitEffects(), which can run from an old render's timer
+  const { c: baseColors, dark: isDark } = themePalette(themeId, systemDark);
   const insets = useSafeAreaInsets();
   const kbHeight = useKeyboardHeight();
   const { width } = useWindowDimensions();
@@ -258,8 +302,8 @@ export default function Game() {
   const lifetimeRef = useRef<LifetimeStats>(EMPTY_LIFETIME);
   const [showAchievements, setShowAchievements] = useState(false);
   // "Achievement unlocked" toasts, shown one at a time.
-  const [toast, setToast] = useState<Achievement | null>(null);
-  const toastQueue = useRef<Achievement[]>([]);
+  const [toast, setToast] = useState<Toast | null>(null);
+  const toastQueue = useRef<Toast[]>([]);
   const toastShowing = useRef(false);
   const toastAnim = useRef(new Animated.Value(0)).current;
 
@@ -299,6 +343,13 @@ export default function Game() {
       setMuted(p.muted);
       setMusicOnState(p.music);
       setMusicEnabled(p.music);
+      setHapticsOn(p.haptics);
+      setHapticsEnabled(p.haptics);
+      setEffectsOn(p.effects);
+      effectsRef.current = p.effects;
+      setThemeId(p.theme);
+      setPackId(p.pack);
+      packRef.current = p.pack;
       if (G.phase === "title") chooseDifficulty(p.difficulty, false);
     });
     const loop = Animated.loop(
@@ -352,13 +403,14 @@ export default function Game() {
   };
 
   const hitEffects = () => {
+    buzz.notify(Haptics.NotificationFeedbackType.Error).catch(() => {});
+    if (!effectsRef.current) return; // Settings: screen shake and flash turned off
     flash.setValue(1);
     Animated.timing(flash, { toValue: 0, duration: 450, useNativeDriver: true }).start();
     shake.setValue(0);
     Animated.sequence(
       [-10, 10, -10, 10, -5, 5, 0].map(v => Animated.timing(shake, { toValue: v, duration: 45, useNativeDriver: true })),
     ).start();
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
   };
 
   const loseLife = (n: number) => {
@@ -392,7 +444,10 @@ export default function Game() {
       shieldBlocks: G.shieldBlocks,
       bucketFilled: G.bucketFilled,
       fastest: G.fastest?.t ?? null,
+      fastestWord: G.fastest?.w ?? null,
+      typingSeconds: G.typingSeconds,
       fastestLong: G.fastestLong,
+      fastestMid: G.fastestMid,
       keys: G.keys,
       goodKeys: G.goodKeys,
     };
@@ -412,6 +467,7 @@ export default function Game() {
     const fresh = newlyUnlocked(achievementContext(), unlockedRef.current);
     if (!fresh.length) return;
     const today = todayKey();
+    const before = unlockedRef.current;
     unlockedRef.current = { ...unlockedRef.current };
     for (const a of fresh) {
       unlockedRef.current[a.id] = today;
@@ -419,7 +475,21 @@ export default function Game() {
     }
     setUnlocked(unlockedRef.current);
     saveAchievements(unlockedRef.current);
-    toastQueue.current.push(...fresh);
+    // Achievements can unlock new themes and word packs.
+    const unlockables = newUnlockables(before, unlockedRef.current);
+    if (G.phase !== "title") {
+      // In a game: no pop-ups to break concentration. They're listed together on the game-over screen.
+      for (const u of unlockables) G.newUnlocks.push(u.kind === "theme" ? `${u.name} theme` : `${u.name} word pack`);
+      return;
+    }
+    toastQueue.current.push(...fresh.map(a => ({ eyebrow: "ACHIEVEMENT UNLOCKED", name: a.name, desc: a.desc })));
+    for (const u of unlockables) {
+      toastQueue.current.push({
+        eyebrow: u.kind === "theme" ? "NEW THEME UNLOCKED" : "NEW WORD PACK UNLOCKED",
+        name: u.name,
+        desc: "Pick it from Customize on the main menu.",
+      });
+    }
     if (!toastShowing.current) showNextToast();
   };
 
@@ -429,7 +499,7 @@ export default function Game() {
     setToast(next ?? null);
     if (!next) return;
     play("achieve");
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    buzz.notify(Haptics.NotificationFeedbackType.Success).catch(() => {});
     toastAnim.setValue(0);
     Animated.sequence([
       Animated.spring(toastAnim, { toValue: 1, friction: 7, tension: 90, useNativeDriver: true }),
@@ -467,7 +537,7 @@ export default function Game() {
     setDifficulty(id);
     if (persist) {
       saveDifficulty(id);
-      Haptics.selectionAsync().catch(() => {});
+      buzz.select().catch(() => {});
     }
     // Keep the title screen's HUD in step with the pick.
     if (G.phase === "title") {
@@ -497,6 +567,7 @@ export default function Game() {
     timers.current = [];
     Object.assign(G, freshState(daily ? DAILY_DIFFICULTY : DIFFICULTIES[difficultyRef.current]));
     G.careerSaved = false;
+    G.pack = daily ? null : PACK_BY_ID[packRef.current].words; // the Daily always uses the standard words
     if (daily) {
       const today = todayKey();
       G.daily = true;
@@ -547,6 +618,7 @@ export default function Game() {
       G.recent,
       maxLettersAt(sizing.current.stageWidth, sizing.current.glyphPerPx),
       rng.current.words,
+      G.pack,
     );
     G.recent.push(G.word);
     if (G.recent.length > 40) G.recent.shift();
@@ -595,7 +667,7 @@ export default function Game() {
     popOverlay();
     play("timeout");
     playMusic("boss");
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+    buzz.notify(Haptics.NotificationFeedbackType.Warning).catch(() => {});
     bump();
     later(nextWord, BOSS.introMs);
   };
@@ -615,7 +687,7 @@ export default function Game() {
     G.score += pts;
     addFloat(`${G.bossName} defeated! +${pts}`, "reward");
     playVictory(); // stops the boss music and plays the fanfare
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    buzz.notify(Haptics.NotificationFeedbackType.Success).catch(() => {});
     checkRewards();
     checkAchievements();
     const won = rollBonus(G.bonus, rng.current.bonus);
@@ -679,7 +751,7 @@ export default function Game() {
         G.shieldBlocks++;
         checkAchievements();
         addFloat("Shield blocked it", "reward", G.pos);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+        buzz.notify(Haptics.NotificationFeedbackType.Warning).catch(() => {});
         bump();
         return;
       }
@@ -697,6 +769,7 @@ export default function Game() {
   /** `auto`: finished by Auto-Type, so it doesn't count as a fast word. */
   const solved = (auto = false) => {
     const used = (Date.now() - G.wordStart) / 1000;
+    G.typingSeconds += Math.min(used, G.wordLimit);
     let pts = scoreWord(G.round, used, G.wordLimit, G.wordMisses);
     let mult = 1;
     if (G.doubleWords > 0) {
@@ -726,6 +799,7 @@ export default function Game() {
     if (!auto) {
       if (!G.fastest || used < G.fastest.t) G.fastest = { t: used, w: G.word };
       if (G.word.length >= 7 && (G.fastestLong === null || used < G.fastestLong)) G.fastestLong = used;
+      if (G.word.length >= 5 && (G.fastestMid === null || used < G.fastestMid)) G.fastestMid = used;
     }
     G.phase = "between";
     G.look = "solved";
@@ -734,7 +808,7 @@ export default function Game() {
     const tags = [mult > 1 ? `${mult}×` : "", combo > 1 ? `combo ×${combo}` : ""].filter(Boolean).join(", ");
     addFloat(`+${pts}${tags ? ` (${tags})` : ""}${G.wordMisses === 0 && !hit && !tags ? " flawless" : ""}${hit}`, "good");
     play("word");
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    buzz.impact(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     checkRewards();
     checkAchievements();
     bump();
@@ -742,6 +816,7 @@ export default function Game() {
   };
 
   const timedOut = () => {
+    G.typingSeconds += G.wordLimit;
     G.phase = "between";
     G.look = "timedOut";
     G.wrongAt = null;
@@ -772,6 +847,7 @@ export default function Game() {
     recordDaily();
     checkAchievements(); // end-of-game ones, like Sharpshooter
     saveCareer();
+    if (G.newAchievements.length) later(() => play("achieve"), 900); // after the game-over sound
     Keyboard.dismiss();
     popOverlay();
     bump();
@@ -811,7 +887,18 @@ export default function Game() {
     recordBest();
     recordDaily();
     Keyboard.dismiss();
+    // Quitting skips the game-over screen, so sum up this game's unlocks in one pop-up instead.
+    const names = G.newAchievements;
+    const extras = G.newUnlocks;
     toTitle();
+    if (names.length) {
+      toastQueue.current.push({
+        eyebrow: names.length === 1 ? "NEW ACHIEVEMENT" : `${names.length} NEW ACHIEVEMENTS`,
+        name: names.length === 1 ? names[0] : `${names[0]} +${names.length - 1} more`,
+        desc: extras.length ? `Unlocked: ${extras.join(", ")}` : "See them all in Achievements.",
+      });
+      if (!toastShowing.current) showNextToast();
+    }
   };
 
   const pause = () => {
@@ -848,7 +935,7 @@ export default function Game() {
         G.inventory.push(id);
         if (G.inventory.length >= REWARDS.bucketSize) G.bucketFilled = true;
         later(() => addFloat(`New power-up: ${POWERUPS[id].name}`, "reward"), 280);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+        buzz.notify(Haptics.NotificationFeedbackType.Success).catch(() => {});
       } else {
         later(() => addFloat("Bucket full · reward lost", "bad"), 280);
       }
@@ -949,7 +1036,7 @@ export default function Game() {
       G.bonusesUsed++;
       checkAchievements();
       addFloat(BONUS_POWERUPS[id].name, "reward");
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      buzz.notify(Haptics.NotificationFeedbackType.Success).catch(() => {});
       play("round");
     }
     focusInput();
@@ -972,6 +1059,7 @@ export default function Game() {
         setClock(G.wordLimit);
         return null;
       case "skip":
+        G.typingSeconds += Math.min((Date.now() - G.wordStart) / 1000, G.wordLimit);
         G.phase = "between";
         G.look = "skipped";
         G.wrongAt = null;
@@ -1004,7 +1092,7 @@ export default function Game() {
       G.powerUpsUsed++;
       checkAchievements();
       addFloat(POWERUPS[id].name, "reward");
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+      buzz.impact(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
       play("round");
     }
     focusInput();
@@ -1016,6 +1104,58 @@ export default function Game() {
     setMusicOnState(on);
     setMusicEnabled(on);
     saveMusic(on);
+  };
+
+  const chooseTheme = (t: Theme) => {
+    if (!meetsRequirement(t.requires, unlockedRef.current)) return;
+    setThemeId(t.id);
+    saveTheme(t.id);
+    buzz.select().catch(() => {});
+  };
+
+  const choosePack = (p: WordPack) => {
+    if (!meetsRequirement(p.requires, unlockedRef.current)) return;
+    setPackId(p.id);
+    packRef.current = p.id;
+    savePack(p.id);
+    buzz.select().catch(() => {});
+  };
+
+  const toggleHaptics = (on: boolean) => {
+    setHapticsOn(on);
+    setHapticsEnabled(on);
+    saveHaptics(on);
+    if (on) buzz.select().catch(() => {});
+  };
+
+  const toggleEffects = (on: boolean) => {
+    setEffectsOn(on);
+    effectsRef.current = on;
+    saveEffects(on);
+  };
+
+  const doReset = () => {
+    if (confirmReset === "stats") {
+      bestRef.current = { easy: 0, medium: 0, hard: 0, impossible: 0 };
+      setBest(bestRef.current);
+      lifetimeRef.current = EMPTY_LIFETIME;
+      setLifetime(EMPTY_LIFETIME);
+      resetStats();
+    } else if (confirmReset === "achievements") {
+      unlockedRef.current = {};
+      setUnlocked({});
+      setThemeId("classic");
+      setPackId("classic");
+      packRef.current = "classic";
+      resetAchievements();
+    }
+    setConfirmReset(null);
+    buzz.notify(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+  };
+
+  const openSettings = () => {
+    setConfirmReset(null);
+    setShowSettings(true);
   };
 
   const toggleMute = () => {
@@ -1267,7 +1407,12 @@ export default function Game() {
       {/* Overlays */}
       {G.phase === "title" && (
         <Overlay c={c} pop={overlayPop}>
-          <Text style={s.eyebrow}>A TYPING SURVIVAL GAME</Text>
+          <View style={s.achHead}>
+            <Text style={[s.eyebrow, { flex: 1, paddingTop: 6 }]}>A TYPING SURVIVAL GAME</Text>
+            <Pressable style={s.chip} onPress={openSettings} hitSlop={10} accessibilityRole="button" accessibilityLabel="Settings">
+              <Text style={s.chipText}>SETTINGS</Text>
+            </Pressable>
+          </View>
           <Text style={s.h1}>TypeSpeedy</Text>
           <Text style={s.demo}>
             <Text style={{ color: c.ink }}>surv</Text>
@@ -1299,13 +1444,89 @@ export default function Game() {
             ))}
           </View>
           <Btn c={c} label={`Start ${G.d.label}`} onPress={() => startGame()} />
-          <Btn c={c} label="How to play" onPress={() => setShowHelp(true)} secondary />
-          <Btn
-            c={c}
-            label={`Achievements · ${Object.keys(unlocked).length} of ${ACHIEVEMENTS.length}`}
-            onPress={() => setShowAchievements(true)}
-            secondary
-          />
+          <View style={s.btnGrid}>
+            <View style={s.btnHalf}>
+              <Btn c={c} label="How to play" onPress={() => setShowHelp(true)} secondary />
+            </View>
+            <View style={s.btnHalf}>
+              <Btn c={c} label="Stats" onPress={() => setShowStats(true)} secondary />
+            </View>
+            <View style={s.btnHalf}>
+              <Btn
+                c={c}
+                label={`Achievements ${Object.keys(unlocked).length}/${ACHIEVEMENTS.length}`}
+                onPress={() => setShowAchievements(true)}
+                secondary
+              />
+            </View>
+            <View style={s.btnHalf}>
+              <Btn c={c} label="Customize" onPress={() => setShowCustomize(true)} secondary />
+            </View>
+          </View>
+        </Overlay>
+      )}
+
+      {G.phase === "title" && showStats && (
+        <Overlay c={c} pop={overlayPop}>
+          <View style={s.achHead}>
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text style={s.eyebrow}>STATS</Text>
+              <Text style={s.h2}>Your career</Text>
+            </View>
+            <Pressable style={s.chip} onPress={() => setShowStats(false)} hitSlop={10} accessibilityRole="button">
+              <Text style={s.chipText}>CLOSE</Text>
+            </Pressable>
+          </View>
+          {lifetime.games === 0 ? (
+            <Text style={s.body}>Play a game and your totals and records will show up here.</Text>
+          ) : (
+            <StatsBody c={c} life={lifetime} best={best} streak={dailyStreak} unlockedCount={Object.keys(unlocked).length} />
+          )}
+          <Btn c={c} label="Done" onPress={() => setShowStats(false)} />
+        </Overlay>
+      )}
+
+      {G.phase === "title" && showCustomize && (
+        <Overlay c={c} pop={overlayPop}>
+          <View style={s.achHead}>
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text style={s.eyebrow}>CUSTOMIZE</Text>
+              <Text style={s.h2}>Make it yours</Text>
+            </View>
+            <Pressable style={s.chip} onPress={() => setShowCustomize(false)} hitSlop={10} accessibilityRole="button">
+              <Text style={s.chipText}>CLOSE</Text>
+            </Pressable>
+          </View>
+          <Text style={s.body}>Earn achievements to unlock new color themes and word packs.</Text>
+          <Text style={s.label}>COLOR THEME</Text>
+          <View style={s.diffGrid} accessibilityRole="radiogroup">
+            {THEMES.map(t => (
+              <ThemeCard
+                key={t.id}
+                c={c}
+                t={t}
+                preview={themePalette(t.id, systemDark).c}
+                open={meetsRequirement(t.requires, unlocked)}
+                selected={themeId === t.id}
+                onPress={() => chooseTheme(t)}
+              />
+            ))}
+          </View>
+          <Text style={[s.label, { marginTop: 6 }]}>WORD PACK</Text>
+          <View style={{ gap: 8 }} accessibilityRole="radiogroup">
+            {WORD_PACKS.map(p => (
+              <PackRow
+                key={p.id}
+                c={c}
+                p={p}
+                open={meetsRequirement(p.requires, unlocked)}
+                selected={packId === p.id}
+                onPress={() => choosePack(p)}
+              />
+            ))}
+          </View>
+          <Text style={s.slotEffect}>Word packs apply to normal games. The Daily Challenge always uses the standard words so everyone gets the same ones.</Text>
+          <Btn c={c} label="Done" onPress={() => setShowCustomize(false)} />
         </Overlay>
       )}
 
@@ -1382,6 +1603,88 @@ export default function Game() {
         </Overlay>
       )}
 
+      {(G.phase === "title" || G.phase === "paused") && showSettings && (
+        <Overlay c={c} pop={overlayPop}>
+          <View style={s.achHead}>
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text style={s.eyebrow}>PREFERENCES</Text>
+              <Text style={s.h2}>Settings</Text>
+            </View>
+            <Pressable style={s.chip} onPress={() => setShowSettings(false)} hitSlop={10} accessibilityRole="button">
+              <Text style={s.chipText}>CLOSE</Text>
+            </Pressable>
+          </View>
+
+          <Text style={s.label}>SOUND</Text>
+          <View style={s.setGroup}>
+            <SettingRow c={c} label="Sound effects" detail="Key clicks, misses and fanfares" value={!muted} onChange={toggleMute} />
+            <SettingRow c={c} label="Music" detail="Retro background music" value={musicOn} onChange={toggleMusic} last />
+          </View>
+
+          <Text style={s.label}>FEEL</Text>
+          <View style={s.setGroup}>
+            <SettingRow
+              c={c}
+              label="Vibration"
+              detail="Buzz on misses, finished words and rewards"
+              value={hapticsOn}
+              onChange={toggleHaptics}
+            />
+            <SettingRow
+              c={c}
+              label="Screen shake & flash"
+              detail="Shake and red flash on a miss. The letter still turns red when off."
+              value={effectsOn}
+              onChange={toggleEffects}
+              last
+            />
+          </View>
+
+          {G.phase === "title" && (
+            <>
+              <Text style={s.label}>LOOK & WORDS</Text>
+              <Btn
+                c={c}
+                label="Themes and word packs"
+                onPress={() => {
+                  setShowSettings(false);
+                  setShowCustomize(true);
+                }}
+                secondary
+              />
+
+              <Text style={s.label}>RESET</Text>
+              {confirmReset ? (
+                <View style={s.achNew}>
+                  <Text style={[s.ruleText, { fontFamily: fonts.bodyStrong }]}>
+                    {confirmReset === "stats"
+                      ? "Erase your best scores and career stats? This can’t be undone."
+                      : "Lock every achievement again? Themes and word packs they unlocked go back to Classic. This can’t be undone."}
+                  </Text>
+                  <Btn c={c} label={confirmReset === "stats" ? "Yes, reset stats" : "Yes, reset achievements"} onPress={doReset} danger />
+                  <Btn c={c} label="Cancel" onPress={() => setConfirmReset(null)} secondary />
+                </View>
+              ) : (
+                <View style={s.btnGrid}>
+                  <View style={s.btnHalf}>
+                    <Btn c={c} label="Reset stats" onPress={() => setConfirmReset("stats")} secondary />
+                  </View>
+                  <View style={s.btnHalf}>
+                    <Btn c={c} label="Reset achievements" onPress={() => setConfirmReset("achievements")} secondary />
+                  </View>
+                </View>
+              )}
+            </>
+          )}
+
+          <Text style={s.slotEffect}>
+            TypeSpeedy {APP_VERSION} · Music and sounds are original, made for this game · Fonts: Bricolage Grotesque, IBM Plex
+            Mono and Inter (SIL Open Font License)
+          </Text>
+          <Btn c={c} label="Done" onPress={() => setShowSettings(false)} />
+        </Overlay>
+      )}
+
       {G.phase === "banner" && (
         <View style={[StyleSheet.absoluteFill, s.bannerWrap]} pointerEvents="none">
           {G.inBoss ? (
@@ -1437,6 +1740,7 @@ export default function Game() {
           ) : (
             <>
               <Btn c={c} label="Resume" onPress={resume} />
+              <Btn c={c} label="Settings" onPress={openSettings} secondary />
               <Btn c={c} label="Quit to main menu" onPress={() => setConfirmQuit(true)} secondary />
             </>
           )}
@@ -1474,6 +1778,11 @@ export default function Game() {
                 {G.newAchievements.length === 1 ? "NEW ACHIEVEMENT" : `${G.newAchievements.length} NEW ACHIEVEMENTS`}
               </Text>
               <Text style={s.ruleText}>{G.newAchievements.join(" · ")}</Text>
+              {G.newUnlocks.length > 0 && (
+                <Text style={[s.ruleText, { color: c.gold, fontFamily: fonts.bodyStrong }]}>
+                  Unlocked: {G.newUnlocks.join(" · ")}
+                </Text>
+              )}
             </View>
           )}
           {G.daily ? (
@@ -1507,9 +1816,9 @@ export default function Game() {
             },
           ]}
           accessibilityLiveRegion="polite"
-          accessibilityLabel={`Achievement unlocked: ${toast.name}. ${toast.desc}`}
+          accessibilityLabel={`${toast.eyebrow.toLowerCase()}: ${toast.name}. ${toast.desc}`}
         >
-          <Text style={[s.label, { color: c.gold }]}>ACHIEVEMENT UNLOCKED</Text>
+          <Text style={[s.label, { color: c.gold }]}>{toast.eyebrow}</Text>
           <Text style={s.toastName} numberOfLines={1}>
             {toast.name}
           </Text>
@@ -1519,6 +1828,173 @@ export default function Game() {
         </Animated.View>
       )}
     </View>
+  );
+}
+
+/** "45s", "12m", "3h 12m" */
+function formatDuration(seconds: number): string {
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** The Stats screen: lifetime totals and records, in small groups. */
+function StatsBody({
+  c,
+  life,
+  best,
+  streak,
+  unlockedCount,
+}: {
+  c: Palette;
+  life: LifetimeStats;
+  best: BestScores;
+  streak: DailyStreak;
+  unlockedCount: number;
+}) {
+  const s = styles(c);
+  const n = (v: number) => v.toLocaleString();
+  const accuracy = life.keys ? `${((life.goodKeys / life.keys) * 100).toFixed(1)}%` : "–";
+  const streakNow = streak.lastDate === todayKey() || streak.lastDate === yesterdayKey() ? streak.count : 0;
+  const plural = (v: number, word: string) => `${n(v)} ${word}${v === 1 ? "" : "s"}`;
+  const section = (title: string, items: [string, string, string?][]) => (
+    <View style={{ gap: 10 }}>
+      <Text style={[s.label, { color: c.accent }]}>{title}</Text>
+      <View style={s.results}>
+        {items.map(([k, v, note]) => (
+          <Result key={k} c={c} k={k} v={v} note={note} />
+        ))}
+      </View>
+    </View>
+  );
+  return (
+    <View style={{ gap: 18 }}>
+      {section("OVERVIEW", [
+        ["GAMES PLAYED", n(life.games)],
+        ["TIME TYPING", formatDuration(life.typingSeconds)],
+        ["WORDS TYPED", n(life.words)],
+        ["POINTS SCORED", n(life.points)],
+      ])}
+      {section("RECORDS", [
+        ["HIGHEST ROUND", life.bestRound ? n(life.bestRound) : "–"],
+        ["LONGEST STREAK", life.bestStreak ? n(life.bestStreak) : "–", life.bestStreak ? "flawless words" : undefined],
+        ["FASTEST WORD", life.fastest ? `${life.fastest.t.toFixed(2)}s` : "–", life.fastest ? `“${life.fastest.w}”` : undefined],
+        ["AVERAGE SCORE", life.games ? n(Math.round(life.points / life.games)) : "–"],
+      ])}
+      {section(
+        "BEST SCORES",
+        DIFFICULTY_ORDER.map(id => [
+          DIFFICULTIES[id].label.toUpperCase(),
+          best[id] ? n(best[id]) : "–",
+          life.gamesByDifficulty[id] ? plural(life.gamesByDifficulty[id], "game") : undefined,
+        ]),
+      )}
+      {section("ACCURACY", [
+        ["ACCURACY", accuracy],
+        ["LETTERS TYPED", n(life.keys)],
+      ])}
+      {section("BOSSES & ROUNDS", [
+        ["BOSSES BEATEN", n(life.bosses)],
+        ["FLAWLESS BOSSES", n(life.flawlessBosses)],
+        ["PERFECT ROUNDS", n(life.perfectRounds)],
+        ["POWER-UPS USED", n(life.powerUps)],
+      ])}
+      {section("DAILY & MORE", [
+        ["DAILIES PLAYED", n(life.dailies)],
+        ["DAY STREAK", streakNow ? plural(streakNow, "day") : "–"],
+        ["ACHIEVEMENTS", `${unlockedCount} of ${ACHIEVEMENTS.length}`],
+      ])}
+    </View>
+  );
+}
+
+/** Customize: a color theme, drawn in its own colors. */
+function ThemeCard({
+  c,
+  t,
+  preview: p,
+  open,
+  selected,
+  onPress,
+}: {
+  c: Palette;
+  t: Theme;
+  preview: Palette;
+  open: boolean;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  const s = styles(c);
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!open}
+      style={[s.diffCard, { gap: 6 }, selected && { borderColor: c.accent, backgroundColor: c.accentSoft }]}
+      accessibilityRole="radio"
+      accessibilityState={{ selected, disabled: !open }}
+      accessibilityLabel={`${t.name} theme${open ? "" : `, locked. ${requirementText(t.requires)}`}`}
+    >
+      <View style={[s.themeSwatch, { backgroundColor: p.bg, borderColor: p.line, opacity: open ? 1 : 0.45 }]}>
+        <Text style={[s.themeWord, { color: p.ink }]} allowFontScaling={false}>
+          ty<Text style={{ color: p.miss }}>p</Text>
+          <Text style={{ color: p.ghost }}>e</Text>
+        </Text>
+        <View style={s.themeDots}>
+          {[p.accent, p.good, p.gold].map((col, i) => (
+            <View key={i} style={[s.themeDot, { backgroundColor: col }]} />
+          ))}
+        </View>
+      </View>
+      <Text style={[s.slotName, { color: selected ? c.accent : open ? c.ink : c.muted }]}>
+        {open ? "" : "🔒 "}
+        {t.name}
+      </Text>
+      {open ? (
+        <Text style={s.slotEffect}>{t.palette ? (selected ? "In use" : "Unlocked") : "Follows your phone"}</Text>
+      ) : (
+        <Text style={s.slotEffect}>{requirementText(t.requires)}</Text>
+      )}
+    </Pressable>
+  );
+}
+
+/** Customize: a word pack, with a few of its words. */
+function PackRow({
+  c,
+  p,
+  open,
+  selected,
+  onPress,
+}: {
+  c: Palette;
+  p: WordPack;
+  open: boolean;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  const s = styles(c);
+  const sample = p.words ? [p.words[30], p.words[60], p.words[100] ?? p.words[90]].filter(Boolean).join(" · ") : "";
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={!open}
+      style={[s.achRow, selected && { borderColor: c.accent, backgroundColor: c.accentSoft }, !open && { opacity: 0.75 }]}
+      accessibilityRole="radio"
+      accessibilityState={{ selected, disabled: !open }}
+      accessibilityLabel={`${p.name} word pack${open ? "" : `, locked. ${requirementText(p.requires)}`}`}
+    >
+      <View style={{ flex: 1, gap: 2 }}>
+        <Text style={[s.slotName, { color: selected ? c.accent : open ? c.ink : c.muted }]}>
+          {open ? "" : "🔒 "}
+          {p.name}
+          {p.words && open ? <Text style={s.achCount}>{`  ${p.words.length} words`}</Text> : null}
+        </Text>
+        <Text style={s.slotEffect}>{open ? `${p.desc}${sample ? ` ${sample}` : ""}` : requirementText(p.requires)}</Text>
+      </View>
+      {selected && <Text style={s.achDate}>IN USE</Text>}
+    </Pressable>
   );
 }
 
@@ -1861,7 +2337,54 @@ function Result({ c, k, v, note }: { c: Palette; k: string; v: string; note?: st
   );
 }
 
-function Btn({ c, label, onPress, secondary }: { c: Palette; label: string; onPress: () => void; secondary?: boolean }) {
+/** A labeled on/off switch in the Settings screen. */
+function SettingRow({
+  c,
+  label,
+  detail,
+  value,
+  onChange,
+  last,
+}: {
+  c: Palette;
+  label: string;
+  detail: string;
+  value: boolean;
+  onChange: (on: boolean) => void;
+  last?: boolean;
+}) {
+  const s = styles(c);
+  return (
+    <View style={[s.setRow, !last && { borderBottomWidth: 1, borderBottomColor: c.line }]}>
+      <View style={{ flex: 1, gap: 2 }}>
+        <Text style={[s.slotName, { color: c.ink }]}>{label}</Text>
+        <Text style={s.slotEffect}>{detail}</Text>
+      </View>
+      <Switch
+        value={value}
+        onValueChange={onChange}
+        trackColor={{ false: c.line, true: c.accent }}
+        thumbColor={Platform.OS === "android" ? (value ? c.onAccent : c.muted) : undefined}
+        ios_backgroundColor={c.line}
+        accessibilityLabel={label}
+      />
+    </View>
+  );
+}
+
+function Btn({
+  c,
+  label,
+  onPress,
+  secondary,
+  danger,
+}: {
+  c: Palette;
+  label: string;
+  onPress: () => void;
+  secondary?: boolean;
+  danger?: boolean;
+}) {
   const s = styles(c);
   return (
     <Pressable
@@ -1869,6 +2392,7 @@ function Btn({ c, label, onPress, secondary }: { c: Palette; label: string; onPr
       style={({ pressed }) => [
         s.btn,
         secondary && s.btnSecondary,
+        danger && { backgroundColor: c.miss },
         pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
       ]}
       accessibilityRole="button"
@@ -2018,6 +2542,22 @@ function make(c: Palette) {
     btn: { backgroundColor: c.accent, borderRadius: 12, paddingVertical: 15, alignItems: "center" },
     btnText: { fontFamily: fonts.bodyStrong, fontSize: 16, color: c.onAccent },
 
+    setGroup: { borderWidth: 1, borderColor: c.line, borderRadius: 12, paddingHorizontal: 12, marginTop: -6 },
+    setRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 11 },
+    btnGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 10 },
+    btnHalf: { width: "48.5%" },
+    themeSwatch: {
+      borderWidth: 1,
+      borderRadius: 8,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    themeWord: { fontFamily: fonts.word, fontSize: 20 },
+    themeDots: { flexDirection: "row", gap: 4 },
+    themeDot: { width: 9, height: 9, borderRadius: 5 },
     achHead: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
     achRow: {
       flexDirection: "row",

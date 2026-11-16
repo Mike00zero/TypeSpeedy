@@ -1,34 +1,82 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
-import { EMPTY_LIFETIME, type LifetimeStats, type Unlocked } from "./achievements";
+import { EMPTY_LIFETIME, pruneUnlocked, type LifetimeStats, type Unlocked } from "./achievements";
 import { DIFFICULTY_ORDER, type DifficultyId } from "./config";
+import { PACK_BY_ID, THEME_BY_ID, type PackId, type ThemeId } from "./unlocks";
 
 const BEST = "typespeedy.best"; // per difficulty: typespeedy.best.easy, ...
 const LEGACY_BEST = "typespeedy.best"; // before difficulties existed (counts as medium)
 const MUTED = "typespeedy.muted";
 const MUSIC = "typespeedy.music";
 const DIFFICULTY = "typespeedy.difficulty";
+const THEME = "typespeedy.theme";
+const PACK = "typespeedy.pack";
+const HAPTICS = "typespeedy.haptics";
+const EFFECTS = "typespeedy.effects"; // screen shake and red flash on a miss
 
 export type BestScores = Record<DifficultyId, number>;
 
-export async function loadPrefs(): Promise<{ best: BestScores; muted: boolean; music: boolean; difficulty: DifficultyId }> {
+type Prefs = {
+  best: BestScores;
+  muted: boolean;
+  music: boolean;
+  difficulty: DifficultyId;
+  theme: ThemeId;
+  pack: PackId;
+  haptics: boolean;
+  effects: boolean;
+};
+
+export async function loadPrefs(): Promise<Prefs> {
   const best: BestScores = { easy: 0, medium: 0, hard: 0, impossible: 0 };
   try {
-    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, MUSIC, DIFFICULTY];
+    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, MUSIC, DIFFICULTY, THEME, PACK, HAPTICS, EFFECTS];
     const pairs = await AsyncStorage.multiGet(keys);
     const get = (k: string) => pairs.find(([key]) => key === k)?.[1] ?? null;
     for (const d of DIFFICULTY_ORDER) best[d] = Number(get(`${BEST}.${d}`)) || 0;
     best.medium = Math.max(best.medium, Number(get(LEGACY_BEST)) || 0);
     const saved = get(DIFFICULTY) as DifficultyId | null;
+    const theme = get(THEME) as ThemeId | null;
+    const pack = get(PACK) as PackId | null;
     return {
       best,
       muted: get(MUTED) === "1",
       music: get(MUSIC) !== "0", // on unless turned off
       difficulty: saved && DIFFICULTY_ORDER.includes(saved) ? saved : "medium",
+      theme: theme && THEME_BY_ID[theme] ? theme : "classic",
+      pack: pack && PACK_BY_ID[pack] ? pack : "classic",
+      haptics: get(HAPTICS) !== "0", // on unless turned off
+      effects: get(EFFECTS) !== "0",
     };
   } catch {
-    return { best, muted: false, music: true, difficulty: "medium" };
+    return { best, muted: false, music: true, difficulty: "medium", theme: "classic", pack: "classic", haptics: true, effects: true };
   }
+}
+
+export function saveHaptics(on: boolean) {
+  AsyncStorage.setItem(HAPTICS, on ? "1" : "0").catch(() => {});
+}
+
+export function saveEffects(on: boolean) {
+  AsyncStorage.setItem(EFFECTS, on ? "1" : "0").catch(() => {});
+}
+
+/** Settings > Reset stats: best scores and lifetime totals. Today's Daily try stays used. */
+export function resetStats() {
+  AsyncStorage.multiRemove([...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, LIFETIME_KEY]).catch(() => {});
+}
+
+/** Settings > Reset achievements (themes and word packs they unlocked go back to Classic). */
+export function resetAchievements() {
+  AsyncStorage.multiRemove([ACHIEVEMENTS_KEY, THEME, PACK]).catch(() => {});
+}
+
+export function saveTheme(theme: ThemeId) {
+  AsyncStorage.setItem(THEME, theme).catch(() => {});
+}
+
+export function savePack(pack: PackId) {
+  AsyncStorage.setItem(PACK, pack).catch(() => {});
 }
 
 export function saveBest(difficulty: DifficultyId, score: number) {
@@ -90,12 +138,21 @@ export async function loadAchievements(): Promise<{ unlocked: Unlocked; lifetime
   try {
     const [a, l] = await Promise.all([AsyncStorage.getItem(ACHIEVEMENTS_KEY), AsyncStorage.getItem(LIFETIME_KEY)]);
     return {
-      unlocked: a ? (JSON.parse(a) as Unlocked) : {},
-      lifetime: l ? { ...EMPTY_LIFETIME, ...(JSON.parse(l) as Partial<LifetimeStats>) } : EMPTY_LIFETIME,
+      unlocked: a ? pruneUnlocked(JSON.parse(a) as Unlocked) : {},
+      lifetime: l ? mergeLifetime(JSON.parse(l) as Partial<LifetimeStats>) : EMPTY_LIFETIME,
     };
   } catch {
     return { unlocked: {}, lifetime: EMPTY_LIFETIME };
   }
+}
+
+/** Fills in fields an older save doesn't have. */
+function mergeLifetime(saved: Partial<LifetimeStats>): LifetimeStats {
+  return {
+    ...EMPTY_LIFETIME,
+    ...saved,
+    gamesByDifficulty: { ...EMPTY_LIFETIME.gamesByDifficulty, ...saved.gamesByDifficulty },
+  };
 }
 
 export function saveAchievements(unlocked: Unlocked) {

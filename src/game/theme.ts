@@ -77,6 +77,10 @@ export const bossPalette: Palette = {
   violet: "#C9A8FF",
 };
 
+/** The Classic theme's two looks (it follows the phone's light or dark mode). */
+export const lightPalette = light;
+export const darkPalette = dark;
+
 export const fonts = {
   display: "BricolageGrotesque_800ExtraBold",
   displayMedium: "BricolageGrotesque_500Medium",
