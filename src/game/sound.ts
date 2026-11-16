@@ -7,6 +7,7 @@ const SOURCES = {
   timeout: require("../../assets/sounds/timeout.wav"),
   round: require("../../assets/sounds/round.wav"),
   over: require("../../assets/sounds/over.wav"),
+  achieve: require("../../assets/sounds/achieve.wav"),
   victory: require("../../assets/music/victory.wav"),
 };
 

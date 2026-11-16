@@ -41,12 +41,15 @@ import { pickWord } from "./words";
 import { bossPalette, fonts, usePalette, type Palette } from "./theme";
 import { initSounds, pauseMusic, play, playMusic, playVictory, resumeMusic, setMusicEnabled, setMuted } from "./sound";
 import {
+  loadAchievements,
   loadDaily,
   loadPrefs,
+  saveAchievements,
   saveBest,
   saveDaily,
   saveDailyStreak,
   saveDifficulty,
+  saveLifetime,
   saveMusic,
   saveMuted,
   type BestScores,
@@ -76,6 +79,19 @@ import {
   yesterdayKey,
   type RandomStreams,
 } from "./daily";
+import {
+  ACHIEVEMENTS,
+  ACHIEVEMENT_GROUPS,
+  EMPTY_LIFETIME,
+  addRun,
+  emptyRun,
+  newlyUnlocked,
+  type Achievement,
+  type AchievementContext,
+  type LifetimeStats,
+  type RunStats,
+  type Unlocked,
+} from "./achievements";
 
 type Phase = "title" | "banner" | "playing" | "between" | "paused" | "over" | "bossReward";
 type WordLook = "normal" | "solved" | "timedOut" | "skipped";
@@ -125,6 +141,18 @@ type GameState = {
   recent: string[];
   daily: boolean; // playing today's Daily Challenge
   dailyDate: string;
+  // For achievements
+  bonusesUsed: number;
+  shieldBlocks: number;
+  bucketFilled: boolean;
+  fastestLong: number | null; // quickest 7-letter word, in seconds
+  flawlessBosses: number;
+  clutchBosses: number;
+  perfectRounds: number;
+  roundMisses: number; // wrong letters + timeouts this round (boss included)
+  bossMisses: number; // wrong letters + timeouts in this boss fight
+  newAchievements: string[]; // names unlocked this game, for the game-over screen
+  careerSaved: boolean; // this game's totals were added to the lifetime stats
 };
 
 const MAX_LIVES = Math.max(...DIFFICULTY_ORDER.map(id => DIFFICULTIES[id].lives));
@@ -174,6 +202,17 @@ function freshState(d: Difficulty): GameState {
     recent: [],
     daily: false,
     dailyDate: "",
+    bonusesUsed: 0,
+    shieldBlocks: 0,
+    bucketFilled: false,
+    fastestLong: null,
+    flawlessBosses: 0,
+    clutchBosses: 0,
+    perfectRounds: 0,
+    roundMisses: 0,
+    bossMisses: 0,
+    newAchievements: [],
+    careerSaved: true, // nothing to save until a game starts
   };
 }
 
@@ -211,6 +250,18 @@ export default function Game() {
   const [dailyStreak, setDailyStreak] = useState<DailyStreak>({ count: 0, lastDate: "" });
   // Random numbers for word, boss and reward picks: seeded by the date in a Daily Challenge.
   const rng = useRef<RandomStreams>(freeStreams());
+  const dailyStreakRef = useRef(0); // current day-streak count, for achievement checks
+  dailyStreakRef.current = dailyStreak.count;
+  const [unlocked, setUnlocked] = useState<Unlocked>({});
+  const unlockedRef = useRef<Unlocked>({});
+  const [lifetime, setLifetime] = useState<LifetimeStats>(EMPTY_LIFETIME);
+  const lifetimeRef = useRef<LifetimeStats>(EMPTY_LIFETIME);
+  const [showAchievements, setShowAchievements] = useState(false);
+  // "Achievement unlocked" toasts, shown one at a time.
+  const [toast, setToast] = useState<Achievement | null>(null);
+  const toastQueue = useRef<Achievement[]>([]);
+  const toastShowing = useRef(false);
+  const toastAnim = useRef(new Animated.Value(0)).current;
 
   const inputRef = useRef<TextInputInstance>(null);
   const lastText = useRef("");
@@ -230,9 +281,16 @@ export default function Game() {
   /* ---------- setup ---------- */
   useEffect(() => {
     initSounds();
-    loadDaily().then(d => {
+    Promise.all([loadDaily(), loadAchievements()]).then(([d, a]) => {
       setDailyRecord(d.record);
       setDailyStreak(d.streak);
+      dailyStreakRef.current = d.streak.count;
+      // Keep anything unlocked while loading (unlikely, but don't lose it).
+      unlockedRef.current = { ...a.unlocked, ...unlockedRef.current };
+      setUnlocked(unlockedRef.current);
+      lifetimeRef.current = a.lifetime;
+      setLifetime(a.lifetime);
+      checkAchievements(); // e.g. a Daily streak from before achievements existed
     });
     loadPrefs().then(p => {
       bestRef.current = p.best;
@@ -313,6 +371,82 @@ export default function Game() {
     hitEffects();
   };
 
+  /* ---------- achievements ---------- */
+  /** This game's stats, or null outside a game. */
+  const runStats = (): RunStats | null => {
+    if (G.phase === "title") return null;
+    return {
+      difficulty: G.d.id,
+      daily: G.daily,
+      over: G.phase === "over",
+      score: G.score,
+      round: G.round,
+      wordsTyped: G.wordsTyped,
+      bestStreak: G.bestStreak,
+      bossesDefeated: G.bossesDefeated,
+      flawlessBosses: G.flawlessBosses,
+      clutchBosses: G.clutchBosses,
+      perfectRounds: G.perfectRounds,
+      powerUpsUsed: G.powerUpsUsed,
+      bonusesUsed: G.bonusesUsed,
+      shieldBlocks: G.shieldBlocks,
+      bucketFilled: G.bucketFilled,
+      fastest: G.fastest?.t ?? null,
+      fastestLong: G.fastestLong,
+      keys: G.keys,
+      goodKeys: G.goodKeys,
+    };
+  };
+
+  const achievementContext = (): AchievementContext => {
+    const run = runStats();
+    return {
+      run: run ?? emptyRun(),
+      life: G.careerSaved ? lifetimeRef.current : addRun(lifetimeRef.current, run),
+      dailyStreak: dailyStreakRef.current,
+    };
+  };
+
+  /** Unlocks anything newly reached and queues its toast. Cheap enough to call after every event. */
+  const checkAchievements = () => {
+    const fresh = newlyUnlocked(achievementContext(), unlockedRef.current);
+    if (!fresh.length) return;
+    const today = todayKey();
+    unlockedRef.current = { ...unlockedRef.current };
+    for (const a of fresh) {
+      unlockedRef.current[a.id] = today;
+      if (G.phase !== "title") G.newAchievements.push(a.name);
+    }
+    setUnlocked(unlockedRef.current);
+    saveAchievements(unlockedRef.current);
+    toastQueue.current.push(...fresh);
+    if (!toastShowing.current) showNextToast();
+  };
+
+  const showNextToast = () => {
+    const next = toastQueue.current.shift();
+    toastShowing.current = !!next;
+    setToast(next ?? null);
+    if (!next) return;
+    play("achieve");
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    toastAnim.setValue(0);
+    Animated.sequence([
+      Animated.spring(toastAnim, { toValue: 1, friction: 7, tension: 90, useNativeDriver: true }),
+      Animated.delay(toastQueue.current.length > 0 ? 1100 : 2200), // move faster when several are waiting
+      Animated.timing(toastAnim, { toValue: 0, duration: 220, useNativeDriver: true }),
+    ]).start(() => showNextToast());
+  };
+
+  /** Adds this game's totals to the lifetime stats, once per game. */
+  const saveCareer = () => {
+    if (G.careerSaved) return;
+    G.careerSaved = true;
+    lifetimeRef.current = addRun(lifetimeRef.current, runStats());
+    setLifetime(lifetimeRef.current);
+    saveLifetime(lifetimeRef.current);
+  };
+
   /* ---------- clock ---------- */
   const runClock = (fromFraction: number) => {
     const id = G.wordId;
@@ -343,6 +477,7 @@ export default function Game() {
   };
 
   const toTitle = () => {
+    saveCareer();
     timers.current.forEach(clearTimeout);
     timers.current = [];
     fuse.stopAnimation();
@@ -356,12 +491,14 @@ export default function Game() {
   };
 
   const startGame = (daily = false) => {
+    if (daily && dailyRecord?.date === todayKey()) return; // one try per day
+    saveCareer(); // "Play again" straight from game over
     timers.current.forEach(clearTimeout);
     timers.current = [];
     Object.assign(G, freshState(daily ? DAILY_DIFFICULTY : DIFFICULTIES[difficultyRef.current]));
+    G.careerSaved = false;
     if (daily) {
       const today = todayKey();
-      if (dailyRecord?.date === today) return toTitle(); // one try per day
       G.daily = true;
       G.dailyDate = today;
       rng.current = dailyStreams(today);
@@ -375,6 +512,7 @@ export default function Game() {
           : { count: dailyStreak.lastDate === yesterdayKey() ? dailyStreak.count + 1 : 1, lastDate: today };
       setDailyStreak(streak);
       saveDailyStreak(streak);
+      dailyStreakRef.current = streak.count;
     } else {
       rng.current = freeStreams();
     }
@@ -390,11 +528,13 @@ export default function Game() {
     G.phase = "banner";
     G.limit = timeForRound(G.round, G.d);
     G.wordInRound = 0;
+    G.roundMisses = 0;
     G.word = "";
     fuse.stopAnimation();
     fuse.setValue(1);
     popOverlay();
     if (G.round > 1) play("round");
+    checkAchievements(); // reaching a round (and the Daily ones on the first)
     playMusic("main"); // keeps going if it's already on; restarts after a boss
     bump();
     later(nextWord, 1700);
@@ -445,6 +585,7 @@ export default function Game() {
     G.inBoss = true;
     G.bossMaxHp = bossHp(G.round);
     G.bossHp = G.bossMaxHp;
+    G.bossMisses = 0;
     G.bossName = pickBossName(G.bossHistory, rng.current.bosses);
     G.bossHistory.push(G.bossName);
     G.phase = "banner";
@@ -460,6 +601,7 @@ export default function Game() {
   };
 
   const nextRound = () => {
+    if (G.roundMisses === 0) G.perfectRounds++;
     G.round++;
     startRound();
   };
@@ -467,12 +609,15 @@ export default function Game() {
   const bossDefeated = () => {
     G.inBoss = false;
     G.bossesDefeated++;
+    if (G.bossMisses === 0) G.flawlessBosses++;
+    if (G.lives === 1 && G.d.lives > 1) G.clutchBosses++;
     const pts = BOSS.bonusPointsPerRound * G.round;
     G.score += pts;
     addFloat(`${G.bossName} defeated! +${pts}`, "reward");
     playVictory(); // stops the boss music and plays the fanfare
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     checkRewards();
+    checkAchievements();
     const won = rollBonus(G.bonus, rng.current.bonus);
     if (!G.bonus) {
       G.bonus = won;
@@ -521,6 +666,8 @@ export default function Game() {
       else bump();
     } else {
       G.wordMisses++;
+      G.roundMisses++;
+      G.bossMisses++;
       G.missed.add(G.pos);
       breakCombo(); // even when a Shield saves the life
       G.wrongAt = G.pos;
@@ -529,6 +676,8 @@ export default function Game() {
       play("miss");
       if (G.shields > 0) {
         G.shields--;
+        G.shieldBlocks++;
+        checkAchievements();
         addFloat("Shield blocked it", "reward", G.pos);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
         bump();
@@ -545,7 +694,8 @@ export default function Game() {
     }
   };
 
-  const solved = () => {
+  /** `auto`: finished by Auto-Type, so it doesn't count as a fast word. */
+  const solved = (auto = false) => {
     const used = (Date.now() - G.wordStart) / 1000;
     let pts = scoreWord(G.round, used, G.wordLimit, G.wordMisses);
     let mult = 1;
@@ -573,7 +723,10 @@ export default function Game() {
     G.score += pts;
     if (G.inBoss) G.bossHp = Math.max(0, G.bossHp - 1);
     G.wordsTyped++;
-    if (!G.fastest || used < G.fastest.t) G.fastest = { t: used, w: G.word };
+    if (!auto) {
+      if (!G.fastest || used < G.fastest.t) G.fastest = { t: used, w: G.word };
+      if (G.word.length >= 7 && (G.fastestLong === null || used < G.fastestLong)) G.fastestLong = used;
+    }
     G.phase = "between";
     G.look = "solved";
     fuse.stopAnimation();
@@ -583,6 +736,7 @@ export default function Game() {
     play("word");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     checkRewards();
+    checkAchievements();
     bump();
     later(advance, 260);
   };
@@ -591,10 +745,14 @@ export default function Game() {
     G.phase = "between";
     G.look = "timedOut";
     G.wrongAt = null;
+    G.roundMisses++;
+    G.bossMisses++;
     breakCombo();
     play("timeout");
     if (G.shields > 0) {
       G.shields--;
+      G.shieldBlocks++;
+      checkAchievements();
       addFloat("Too slow · shield blocked it", "reward");
     } else {
       addFloat(G.lives === 1 ? "Too slow" : `Too slow · −${CONFIG.timeoutCost} life`, "bad");
@@ -612,6 +770,8 @@ export default function Game() {
     play("over");
     setIsNewBest(recordBest() && G.score > 0);
     recordDaily();
+    checkAchievements(); // end-of-game ones, like Sharpshooter
+    saveCareer();
     Keyboard.dismiss();
     popOverlay();
     bump();
@@ -686,12 +846,14 @@ export default function Game() {
       if (G.inventory.length < REWARDS.bucketSize) {
         const id = rollPowerUp(rng.current.powerups);
         G.inventory.push(id);
+        if (G.inventory.length >= REWARDS.bucketSize) G.bucketFilled = true;
         later(() => addFloat(`New power-up: ${POWERUPS[id].name}`, "reward"), 280);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       } else {
         later(() => addFloat("Bucket full · reward lost", "bad"), 280);
       }
     }
+    if (G.bucketFilled) checkAchievements();
   };
 
   /** Seconds left on the current word's clock. */
@@ -770,7 +932,7 @@ export default function Game() {
       case "autoType":
         G.pos = G.word.length;
         G.wrongAt = null;
-        solved(); // counts as finishing the word (a hit, in a boss fight)
+        solved(true); // counts as finishing the word (a hit, in a boss fight)
         return null;
     }
   };
@@ -784,6 +946,8 @@ export default function Game() {
     } else {
       G.bonus = null;
       G.powerUpsUsed++;
+      G.bonusesUsed++;
+      checkAchievements();
       addFloat(BONUS_POWERUPS[id].name, "reward");
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
       play("round");
@@ -838,6 +1002,7 @@ export default function Game() {
     } else {
       G.inventory.splice(slot, 1);
       G.powerUpsUsed++;
+      checkAchievements();
       addFloat(POWERUPS[id].name, "reward");
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
       play("round");
@@ -1135,6 +1300,51 @@ export default function Game() {
           </View>
           <Btn c={c} label={`Start ${G.d.label}`} onPress={() => startGame()} />
           <Btn c={c} label="How to play" onPress={() => setShowHelp(true)} secondary />
+          <Btn
+            c={c}
+            label={`Achievements · ${Object.keys(unlocked).length} of ${ACHIEVEMENTS.length}`}
+            onPress={() => setShowAchievements(true)}
+            secondary
+          />
+        </Overlay>
+      )}
+
+      {G.phase === "title" && showAchievements && (
+        <Overlay c={c} pop={overlayPop}>
+          <View style={s.achHead}>
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text style={[s.eyebrow, { color: c.gold }]}>ACHIEVEMENTS</Text>
+              <Text style={s.h2}>
+                {Object.keys(unlocked).length} of {ACHIEVEMENTS.length}
+              </Text>
+            </View>
+            <Pressable style={s.chip} onPress={() => setShowAchievements(false)} hitSlop={10} accessibilityRole="button">
+              <Text style={s.chipText}>CLOSE</Text>
+            </Pressable>
+          </View>
+          <View style={s.fuseTrack}>
+            <View
+              style={[
+                s.fuseFill,
+                { backgroundColor: c.gold, transform: [{ scaleX: Object.keys(unlocked).length / ACHIEVEMENTS.length }] },
+              ]}
+            />
+          </View>
+          {ACHIEVEMENT_GROUPS.map(group => (
+            <View key={group} style={{ gap: 8 }}>
+              <Text style={[s.label, { marginTop: 6 }]}>{group.toUpperCase()}</Text>
+              {ACHIEVEMENTS.filter(a => a.group === group).map(a => (
+                <AchievementRow
+                  key={a.id}
+                  c={c}
+                  a={a}
+                  date={unlocked[a.id]}
+                  ctx={{ run: emptyRun(), life: lifetime, dailyStreak: dailyStreak.count }}
+                />
+              ))}
+            </View>
+          ))}
+          <Btn c={c} label="Done" onPress={() => setShowAchievements(false)} />
         </Overlay>
       )}
 
@@ -1258,6 +1468,14 @@ export default function Game() {
               : ""}
             {G.bestStreak >= 3 ? ` Longest streak: ${G.bestStreak} words.` : ""}
           </Text>
+          {G.newAchievements.length > 0 && (
+            <View style={s.achNew}>
+              <Text style={[s.label, { color: c.gold }]}>
+                {G.newAchievements.length === 1 ? "NEW ACHIEVEMENT" : `${G.newAchievements.length} NEW ACHIEVEMENTS`}
+              </Text>
+              <Text style={s.ruleText}>{G.newAchievements.join(" · ")}</Text>
+            </View>
+          )}
           {G.daily ? (
             <>
               <Text style={[s.body, { color: c.ink }]}>
@@ -1275,6 +1493,74 @@ export default function Game() {
           )}
         </Overlay>
       )}
+
+      {/* "Achievement unlocked" toast: over everything, never blocks taps */}
+      {toast && (
+        <Animated.View
+          pointerEvents="none"
+          style={[
+            s.toast,
+            {
+              top: insets.top + 6,
+              opacity: toastAnim,
+              transform: [{ translateY: toastAnim.interpolate({ inputRange: [0, 1], outputRange: [-30, 0] }) }],
+            },
+          ]}
+          accessibilityLiveRegion="polite"
+          accessibilityLabel={`Achievement unlocked: ${toast.name}. ${toast.desc}`}
+        >
+          <Text style={[s.label, { color: c.gold }]}>ACHIEVEMENT UNLOCKED</Text>
+          <Text style={s.toastName} numberOfLines={1}>
+            {toast.name}
+          </Text>
+          <Text style={s.slotEffect} numberOfLines={2}>
+            {toast.desc}
+          </Text>
+        </Animated.View>
+      )}
+    </View>
+  );
+}
+
+/** One line of the achievements list: unlocked (gold, with the date) or locked (with progress). */
+function AchievementRow({
+  c,
+  a,
+  date,
+  ctx,
+}: {
+  c: Palette;
+  a: Achievement;
+  date: string | undefined;
+  ctx: AchievementContext;
+}) {
+  const s = styles(c);
+  const done = !!date;
+  const [cur, target] = a.progress(ctx);
+  const showBar = !done && a.showProgress && cur > 0;
+  return (
+    <View
+      style={[s.achRow, done && { borderColor: c.gold, backgroundColor: c.surface }]}
+      accessibilityLabel={`${a.name}: ${a.desc} ${done ? "Unlocked" : "Locked"}`}
+    >
+      <View style={[s.achMark, { borderColor: done ? c.gold : c.line, backgroundColor: done ? c.gold : "transparent" }]}>
+        <Text style={[s.achMarkText, { color: done ? c.onAccent : c.ghost }]}>{done ? "✓" : ""}</Text>
+      </View>
+      <View style={{ flex: 1, gap: 2 }}>
+        <Text style={[s.slotName, { color: done ? c.ink : c.muted }]}>{a.name}</Text>
+        <Text style={s.slotEffect}>{a.desc}</Text>
+        {showBar && (
+          <View style={s.achBarRow}>
+            <View style={[s.fuseTrack, { flex: 1, height: 6 }]}>
+              <View style={[s.fuseFill, { backgroundColor: c.gold, transform: [{ scaleX: cur / target }] }]} />
+            </View>
+            <Text style={s.achCount}>
+              {cur.toLocaleString()} / {target.toLocaleString()}
+            </Text>
+          </View>
+        )}
+      </View>
+      {done && <Text style={s.achDate}>{prettyDate(date)}</Text>}
     </View>
   );
 }
@@ -1732,6 +2018,43 @@ function make(c: Palette) {
     btn: { backgroundColor: c.accent, borderRadius: 12, paddingVertical: 15, alignItems: "center" },
     btnText: { fontFamily: fonts.bodyStrong, fontSize: 16, color: c.onAccent },
 
+    achHead: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
+    achRow: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      borderWidth: 1,
+      borderColor: c.line,
+      borderRadius: 12,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+    },
+    achMark: { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, alignItems: "center", justifyContent: "center" },
+    achMarkText: { fontFamily: fonts.bodyStrong, fontSize: 13, lineHeight: 16 },
+    achBarRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 3 },
+    achCount: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.muted, fontVariant: ["tabular-nums"] },
+    achDate: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.gold },
+    achNew: { borderWidth: 1.5, borderColor: c.gold, borderRadius: 12, padding: 10, gap: 3 },
+    toast: {
+      position: "absolute",
+      left: 18,
+      right: 18,
+      alignSelf: "center",
+      maxWidth: 480,
+      borderWidth: 1.5,
+      borderColor: c.gold,
+      borderRadius: 14,
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      backgroundColor: c.surface,
+      gap: 2,
+      shadowColor: "#000",
+      shadowOpacity: 0.25,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 4 },
+      elevation: 8,
+    },
+    toastName: { fontFamily: fonts.display, fontSize: 20, color: c.ink },
     bannerWrap: { alignItems: "center", justifyContent: "center", backgroundColor: c.scrim },
     banner: { alignItems: "center", gap: 6 },
     bannerBig: { fontFamily: fonts.display, fontSize: 110, lineHeight: 112, color: c.ink, letterSpacing: -3 },

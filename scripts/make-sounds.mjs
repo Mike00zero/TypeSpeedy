@@ -52,6 +52,8 @@ const sounds = {
   ],
   timeout: [{ at: 0, freq: 240, dur: 0.4, type: "square", vol: 0.3, slideTo: 90 }],
   round: [523, 659, 784].map((freq, i) => ({ at: i * 0.09, freq, dur: 0.16, type: "triangle", vol: 0.45 })),
+  // Achievement unlocked: a quick, bright sparkle that stands apart from the other sounds.
+  achieve: [1319, 1661, 1976, 2637].map((freq, i) => ({ at: i * 0.06, freq, dur: i === 3 ? 0.35 : 0.12, type: "sine", vol: 0.4 })),
   over: [392, 330, 262, 196].map((freq, i) => ({ at: i * 0.16, freq, dur: 0.3, type: "sawtooth", vol: 0.3 })),
 };
 

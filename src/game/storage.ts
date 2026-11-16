@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+import { EMPTY_LIFETIME, type LifetimeStats, type Unlocked } from "./achievements";
 import { DIFFICULTY_ORDER, type DifficultyId } from "./config";
 
 const BEST = "typespeedy.best"; // per difficulty: typespeedy.best.easy, ...
@@ -78,4 +79,29 @@ export function saveDaily(record: DailyRecord) {
 
 export function saveDailyStreak(streak: DailyStreak) {
   AsyncStorage.setItem(DAILY_STREAK, JSON.stringify(streak)).catch(() => {});
+}
+
+/* ---------- Achievements ---------- */
+
+const ACHIEVEMENTS_KEY = "typespeedy.achievements"; // id -> date unlocked
+const LIFETIME_KEY = "typespeedy.lifetime"; // totals across every game
+
+export async function loadAchievements(): Promise<{ unlocked: Unlocked; lifetime: LifetimeStats }> {
+  try {
+    const [a, l] = await Promise.all([AsyncStorage.getItem(ACHIEVEMENTS_KEY), AsyncStorage.getItem(LIFETIME_KEY)]);
+    return {
+      unlocked: a ? (JSON.parse(a) as Unlocked) : {},
+      lifetime: l ? { ...EMPTY_LIFETIME, ...(JSON.parse(l) as Partial<LifetimeStats>) } : EMPTY_LIFETIME,
+    };
+  } catch {
+    return { unlocked: {}, lifetime: EMPTY_LIFETIME };
+  }
+}
+
+export function saveAchievements(unlocked: Unlocked) {
+  AsyncStorage.setItem(ACHIEVEMENTS_KEY, JSON.stringify(unlocked)).catch(() => {});
+}
+
+export function saveLifetime(lifetime: LifetimeStats) {
+  AsyncStorage.setItem(LIFETIME_KEY, JSON.stringify(lifetime)).catch(() => {});
 }
