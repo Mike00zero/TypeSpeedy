@@ -89,6 +89,7 @@ type GameState = {
   bossHp: number; // words left to beat the boss
   bossMaxHp: number;
   bossName: string;
+  bossHistory: string[]; // bosses met this game, so names don't repeat
   bossesDefeated: number;
   streak: number; // words in a row with no wrong letters
   bestStreak: number;
@@ -135,6 +136,7 @@ function freshState(d: Difficulty): GameState {
     bossHp: 0,
     bossMaxHp: 0,
     bossName: "",
+    bossHistory: [],
     bossesDefeated: 0,
     streak: 0,
     bestStreak: 0,
@@ -388,7 +390,8 @@ export default function Game() {
     G.inBoss = true;
     G.bossMaxHp = bossHp(G.round);
     G.bossHp = G.bossMaxHp;
-    G.bossName = pickBossName(G.bossName);
+    G.bossName = pickBossName(G.bossHistory);
+    G.bossHistory.push(G.bossName);
     G.phase = "banner";
     G.word = "";
     fuse.stopAnimation();
