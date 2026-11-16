@@ -10,6 +10,7 @@ import {
   Keyboard,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -21,11 +22,21 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import * as Haptics from "expo-haptics";
 
-import { CONFIG, formatSeconds, scoreWord, timeForRound, wordsInRound } from "./config";
+import {
+  CONFIG,
+  DIFFICULTIES,
+  DIFFICULTY_ORDER,
+  formatSeconds,
+  scoreWord,
+  timeForRound,
+  wordsInRound,
+  type Difficulty,
+  type DifficultyId,
+} from "./config";
 import { pickWord } from "./words";
 import { fonts, usePalette, type Palette } from "./theme";
 import { initSounds, play, setMuted } from "./sound";
-import { loadPrefs, saveBest, saveMuted } from "./storage";
+import { loadPrefs, saveBest, saveDifficulty, saveMuted, type BestScores } from "./storage";
 import { useKeyboardHeight } from "./useKeyboardHeight";
 
 type Phase = "title" | "banner" | "playing" | "between" | "paused" | "over";
@@ -33,6 +44,7 @@ type WordLook = "normal" | "solved" | "timedOut";
 type Float = { id: number; text: string; kind: "good" | "bad"; x: number; anim: Animated.Value };
 
 type GameState = {
+  d: Difficulty;
   phase: Phase;
   score: number;
   lives: number;
@@ -55,11 +67,14 @@ type GameState = {
   recent: string[];
 };
 
-function freshState(): GameState {
+const MAX_LIVES = Math.max(...DIFFICULTY_ORDER.map(id => DIFFICULTIES[id].lives));
+
+function freshState(d: Difficulty): GameState {
   return {
+    d,
     phase: "title",
     score: 0,
-    lives: CONFIG.lives,
+    lives: d.lives,
     round: 1,
     wordInRound: 0,
     word: "survival",
@@ -70,7 +85,7 @@ function freshState(): GameState {
     look: "normal",
     wordId: 0,
     wordStart: 0,
-    limit: timeForRound(1),
+    limit: timeForRound(1, d),
     pausedRemaining: 1,
     keys: 0,
     goodKeys: 0,
@@ -87,11 +102,13 @@ export default function Game() {
   const kbHeight = useKeyboardHeight();
   const { width } = useWindowDimensions();
 
-  const G = useRef<GameState>(freshState()).current;
+  const G = useRef<GameState>(freshState(DIFFICULTIES.medium)).current;
   const [, setVersion] = useState(0);
   const bump = useCallback(() => setVersion(v => v + 1), []);
-  const [best, setBest] = useState(0);
-  const bestRef = useRef(0);
+  const [best, setBest] = useState<BestScores>({ easy: 0, medium: 0, hard: 0, impossible: 0 });
+  const bestRef = useRef<BestScores>(best);
+  const [difficulty, setDifficulty] = useState<DifficultyId>("medium");
+  const difficultyRef = useRef<DifficultyId>("medium");
   const [muted, setMutedState] = useState(false);
   const [floats, setFloats] = useState<Float[]>([]);
   const [isNewBest, setIsNewBest] = useState(false);
@@ -108,7 +125,7 @@ export default function Game() {
   const letterPop = useRef(new Animated.Value(1)).current;
   const pulse = useRef(new Animated.Value(1)).current;
   const overlayPop = useRef(new Animated.Value(1)).current;
-  const pips = useRef(Array.from({ length: CONFIG.lives }, () => new Animated.Value(1))).current;
+  const pips = useRef(Array.from({ length: MAX_LIVES }, () => new Animated.Value(1))).current;
 
   /* ---------- setup ---------- */
   useEffect(() => {
@@ -118,6 +135,7 @@ export default function Game() {
       setBest(p.best);
       setMutedState(p.muted);
       setMuted(p.muted);
+      if (G.phase === "title") chooseDifficulty(p.difficulty, false);
     });
     const loop = Animated.loop(
       Animated.sequence([
@@ -198,10 +216,36 @@ export default function Game() {
   };
 
   /* ---------- flow ---------- */
+  const chooseDifficulty = (id: DifficultyId, persist = true) => {
+    difficultyRef.current = id;
+    setDifficulty(id);
+    if (persist) {
+      saveDifficulty(id);
+      Haptics.selectionAsync().catch(() => {});
+    }
+    // Keep the title screen's HUD in step with the pick.
+    if (G.phase === "title") {
+      Object.assign(G, freshState(DIFFICULTIES[id]));
+      bump();
+    }
+  };
+
+  const toTitle = () => {
+    timers.current.forEach(clearTimeout);
+    timers.current = [];
+    fuse.stopAnimation();
+    fuse.setValue(1);
+    Object.assign(G, freshState(DIFFICULTIES[difficultyRef.current]));
+    pips.forEach(p => p.setValue(1));
+    setFloats([]);
+    popOverlay();
+    bump();
+  };
+
   const startGame = () => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
-    Object.assign(G, freshState());
+    Object.assign(G, freshState(DIFFICULTIES[difficultyRef.current]));
     pips.forEach(p => p.setValue(1));
     setFloats([]);
     setIsNewBest(false);
@@ -211,7 +255,7 @@ export default function Game() {
 
   const startRound = () => {
     G.phase = "banner";
-    G.limit = timeForRound(G.round);
+    G.limit = timeForRound(G.round, G.d);
     G.wordInRound = 0;
     G.word = "";
     fuse.stopAnimation();
@@ -223,7 +267,7 @@ export default function Game() {
   };
 
   const nextWord = () => {
-    G.word = pickWord(G.round, G.recent);
+    G.word = pickWord(G.d.lengths(G.round), G.recent);
     G.recent.push(G.word);
     if (G.recent.length > 40) G.recent.shift();
     G.pos = 0;
@@ -267,7 +311,7 @@ export default function Game() {
       letterPop.setValue(1.35);
       Animated.spring(letterPop, { toValue: 1, friction: 4, useNativeDriver: true }).start();
       play("miss");
-      addFloat("−1 life", "bad", G.pos);
+      addFloat(G.d.lives === 1 ? "Miss" : "−1 life", "bad", G.pos);
       loseLife(1);
       if (G.lives <= 0) {
         G.phase = "between";
@@ -298,7 +342,7 @@ export default function Game() {
     G.phase = "between";
     G.look = "timedOut";
     G.wrongAt = null;
-    addFloat(`Too slow · −${CONFIG.timeoutCost} life`, "bad");
+    addFloat(G.d.lives === 1 ? "Too slow" : `Too slow · −${CONFIG.timeoutCost} life`, "bad");
     play("timeout");
     loseLife(CONFIG.timeoutCost);
     bump();
@@ -310,11 +354,12 @@ export default function Game() {
     G.phase = "over";
     fuse.stopAnimation();
     play("over");
-    const newBest = G.score > bestRef.current;
+    const id = G.d.id;
+    const newBest = G.score > bestRef.current[id];
     if (newBest) {
-      bestRef.current = G.score;
-      setBest(G.score);
-      saveBest(G.score);
+      bestRef.current = { ...bestRef.current, [id]: G.score };
+      setBest(bestRef.current);
+      saveBest(id, G.score);
     }
     setIsNewBest(newBest && G.score > 0);
     Keyboard.dismiss();
@@ -366,11 +411,13 @@ export default function Game() {
 
   /* ---------- render ---------- */
   const total = wordsInRound(G.round);
-  const low = G.lives <= 3 && G.lives > 0;
+  const oneLife = G.d.lives === 1;
+  const low = !oneLife && G.lives > 0 && G.lives <= Math.ceil(G.d.lives * 0.3);
+  const bestHere = best[G.d.id];
   const fontSize = wordFontSize(G.word.length || 8, width);
   const hotOpacity = fuse.interpolate({ inputRange: [0, 0.3, 0.31, 1], outputRange: [1, 1, 0, 0] });
   const accuracy = G.keys ? `${Math.round((G.goodKeys / G.keys) * 100)}%` : "–";
-  const prevLimit = G.round > 1 ? timeForRound(G.round - 1) : G.limit;
+  const prevLimit = G.round > 1 ? timeForRound(G.round - 1, G.d) : G.limit;
   let bannerNote = "";
   if (G.round > 1) {
     bannerNote = G.limit < prevLimit ? `Clock −${formatSeconds(prevLimit - G.limit)}` : "Clock at its fastest";
@@ -386,7 +433,9 @@ export default function Game() {
         <View style={s.stat}>
           <Text style={s.label}>SCORE</Text>
           <Text style={s.value}>{G.score.toLocaleString()}</Text>
-          <Text style={s.meta}>Best {Math.max(best, G.score).toLocaleString()}</Text>
+          <Text style={s.meta}>
+            {G.d.label} · Best {Math.max(bestHere, G.score).toLocaleString()}
+          </Text>
         </View>
         <View style={[s.stat, { alignItems: "flex-end" }]}>
           <Text style={s.label}>ROUND</Text>
@@ -397,9 +446,11 @@ export default function Game() {
         </View>
       </View>
       <View style={s.livesRow}>
-        <Text style={[s.label, low && { color: c.miss }]}>LIVES {G.lives}</Text>
-        <View style={s.pips}>
-          {pips.map((p, i) => {
+        <Text style={[s.label, (low || oneLife) && { color: c.miss }]}>
+          {oneLife ? "NO HEALTH · ONE MISS ENDS IT" : `LIVES ${G.lives}`}
+        </Text>
+        <View style={[s.pips, oneLife && { display: "none" }]}>
+          {pips.slice(0, G.d.lives).map((p, i) => {
             const lost = i >= G.lives;
             return (
               <Animated.View
@@ -489,7 +540,9 @@ export default function Game() {
 
         <Text style={s.hint}>
           {G.phase === "playing" && G.round === 1 && G.wordInRound === 0
-            ? "Type the word. Wrong letters cost a life."
+            ? oneLife
+              ? "Type the word. One wrong letter ends the game."
+              : "Type the word. Wrong letters cost a life."
             : kbHeight === 0 && (G.phase === "playing" || G.phase === "banner")
               ? "Tap here to bring up the keyboard"
               : " "}
@@ -538,10 +591,31 @@ export default function Game() {
             <Text style={{ color: c.ink }}>v</Text>
             <Text style={{ color: c.ghost }}>al</Text>
           </Text>
+          <Text style={s.label}>DIFFICULTY</Text>
+          <View style={s.diffGrid} accessibilityRole="radiogroup">
+            {DIFFICULTY_ORDER.map(id => (
+              <DifficultyCard
+                key={id}
+                c={c}
+                d={DIFFICULTIES[id]}
+                best={best[id]}
+                selected={difficulty === id}
+                onPress={() => chooseDifficulty(id)}
+              />
+            ))}
+          </View>
           <Rule c={c} k="POINTS" v="Every word you finish scores. Faster and flawless words score more." />
-          <Rule c={c} k="LIVES" v="You have 10. Each wrong letter turns red and costs one. Running out of time costs one too." />
+          <Rule
+            c={c}
+            k="LIVES"
+            v={
+              oneLife
+                ? "None. One wrong letter or one slow word ends the game."
+                : `You have ${G.d.lives}. Each wrong letter turns red and costs one. Running out of time costs one too.`
+            }
+          />
           <Rule c={c} k="ROUNDS" v="Ten words a round. The clock gets shorter every round, and late rounds get longer." />
-          <Btn c={c} label="Start typing" onPress={startGame} />
+          <Btn c={c} label={`Start ${G.d.label}`} onPress={startGame} />
         </Overlay>
       )}
 
@@ -570,10 +644,17 @@ export default function Game() {
 
       {G.phase === "over" && (
         <Overlay c={c} pop={overlayPop}>
-          <Text style={[s.eyebrow, { color: c.miss }]}>OUT OF LIVES</Text>
+          <Text style={[s.eyebrow, { color: c.miss }]}>
+            {G.d.label.toUpperCase()} · {oneLife ? "GAME OVER" : "OUT OF LIVES"}
+          </Text>
           <Text style={s.h2}>You reached round {G.round}</Text>
           <View style={s.results}>
-            <Result c={c} k="SCORE" v={G.score.toLocaleString()} note={isNewBest ? "New best score" : `Best ${best.toLocaleString()}`} />
+            <Result
+              c={c}
+              k="SCORE"
+              v={G.score.toLocaleString()}
+              note={isNewBest ? `New ${G.d.label} best` : `${G.d.label} best ${bestHere.toLocaleString()}`}
+            />
             <Result c={c} k="WORDS TYPED" v={String(G.wordsTyped)} />
             <Result c={c} k="ACCURACY" v={accuracy} />
             <Result c={c} k="FASTEST WORD" v={G.fastest ? `${G.fastest.t.toFixed(2)}s` : "–"} />
@@ -582,9 +663,43 @@ export default function Game() {
             {G.fastest ? `Your quickest was “${G.fastest.w}”.` : "Finish a word to get on the board."}
           </Text>
           <Btn c={c} label="Play again" onPress={startGame} />
+          <Btn c={c} label="Change difficulty" onPress={toTitle} secondary />
         </Overlay>
       )}
     </View>
+  );
+}
+
+function DifficultyCard({
+  c,
+  d,
+  best,
+  selected,
+  onPress,
+}: {
+  c: Palette;
+  d: Difficulty;
+  best: number;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  const s = styles(c);
+  const health = d.lives === 1 ? "No health" : `${d.lives} lives`;
+  return (
+    <Pressable
+      onPress={onPress}
+      style={[s.diffCard, selected && { borderColor: c.accent, backgroundColor: c.accentSoft }]}
+      accessibilityRole="radio"
+      accessibilityState={{ selected }}
+      accessibilityLabel={`${d.label}: ${formatSeconds(d.startTime)} down to ${formatSeconds(d.minTime)} per word, ${health}, ${d.words}`}
+    >
+      <Text style={[s.diffLabel, selected && { color: c.accent }]}>{d.label}</Text>
+      <Text style={s.diffDetail}>
+        {formatSeconds(d.startTime)} → {formatSeconds(d.minTime)} · {health}
+      </Text>
+      <Text style={s.diffWords}>{d.words}</Text>
+      {best > 0 ? <Text style={s.diffBest}>Best {best.toLocaleString()}</Text> : null}
+    </Pressable>
   );
 }
 
@@ -611,9 +726,14 @@ function Remaining({ G, style }: { G: GameState; style: object }) {
 
 function Overlay({ c, pop, children }: { c: Palette; pop: Animated.Value; children: React.ReactNode }) {
   const s = styles(c);
+  const insets = useSafeAreaInsets();
   return (
-    <View style={[StyleSheet.absoluteFill, s.scrim]}>
-      <Animated.View style={[s.panel, { transform: [{ scale: pop }] }]}>{children}</Animated.View>
+    <View style={[StyleSheet.absoluteFill, s.scrim, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 12 }]}>
+      <Animated.View style={[s.panel, { transform: [{ scale: pop }] }]}>
+        <ScrollView style={{ flexGrow: 0 }} contentContainerStyle={s.panelContent} showsVerticalScrollIndicator={false} bounces={false}>
+          {children}
+        </ScrollView>
+      </Animated.View>
     </View>
   );
 }
@@ -639,15 +759,19 @@ function Result({ c, k, v, note }: { c: Palette; k: string; v: string; note?: st
   );
 }
 
-function Btn({ c, label, onPress }: { c: Palette; label: string; onPress: () => void }) {
+function Btn({ c, label, onPress, secondary }: { c: Palette; label: string; onPress: () => void; secondary?: boolean }) {
   const s = styles(c);
   return (
     <Pressable
       onPress={onPress}
-      style={({ pressed }) => [s.btn, pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] }]}
+      style={({ pressed }) => [
+        s.btn,
+        secondary && s.btnSecondary,
+        pressed && { opacity: 0.85, transform: [{ scale: 0.98 }] },
+      ]}
       accessibilityRole="button"
     >
-      <Text style={s.btnText}>{label}</Text>
+      <Text style={[s.btnText, secondary && { color: c.ink }]}>{label}</Text>
     </Pressable>
   );
 }
@@ -703,9 +827,25 @@ function make(c: Palette) {
       borderRadius: 18,
       borderWidth: 1,
       borderColor: c.line,
-      padding: 24,
-      gap: 16,
+      maxHeight: "100%",
+      overflow: "hidden",
     },
+    panelContent: { padding: 22, gap: 14 },
+    diffGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 10, marginTop: -6 },
+    diffCard: {
+      width: "48.5%",
+      borderWidth: 1.5,
+      borderColor: c.line,
+      borderRadius: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      gap: 2,
+    },
+    diffLabel: { fontFamily: fonts.display, fontSize: 19, color: c.ink },
+    diffDetail: { fontFamily: fonts.bodyStrong, fontSize: 12, color: c.ink, fontVariant: ["tabular-nums"] },
+    diffWords: { fontFamily: fonts.body, fontSize: 12, lineHeight: 16, color: c.muted },
+    diffBest: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.good, marginTop: 2 },
+    btnSecondary: { backgroundColor: "transparent", borderWidth: 1, borderColor: c.line },
     eyebrow: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1.6, color: c.accent },
     h1: { fontFamily: fonts.display, fontSize: 48, lineHeight: 50, color: c.ink, letterSpacing: -1 },
     h2: { fontFamily: fonts.display, fontSize: 34, lineHeight: 38, color: c.ink, letterSpacing: -0.5 },
