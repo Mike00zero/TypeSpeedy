@@ -458,7 +458,7 @@ export default function Game() {
       </View>
       <View style={s.livesRow}>
         <Text style={[s.label, (low || oneLife) && { color: c.miss }]}>
-          {oneLife ? "NO HEALTH · ONE MISS ENDS IT" : `LIVES ${G.lives}`}
+          {oneLife ? "NO LIVES · ONE MISS ENDS IT" : `LIVES ${G.lives}`}
         </Text>
         <View style={[s.pips, oneLife && { display: "none" }]}>
           {pips.slice(0, G.d.lives).map((p, i) => {
@@ -720,7 +720,7 @@ function DifficultyCard({
   onPress: () => void;
 }) {
   const s = styles(c);
-  const health = d.lives === 1 ? "No health" : `${d.lives} lives`;
+  const health = d.lives === 1 ? "No Lives" : `${d.lives} lives`;
   return (
     <Pressable
       onPress={onPress}
@@ -731,7 +731,7 @@ function DifficultyCard({
     >
       <Text style={[s.diffLabel, selected && { color: c.accent }]}>{d.label}</Text>
       <Text style={s.diffDetail}>
-        {formatSeconds(d.startTime)} → {formatSeconds(d.minTime)} · {health}
+        {formatSeconds(d.startTime)} · {health}
       </Text>
       <Text style={s.diffWords}>{d.words}</Text>
       {best > 0 ? <Text style={s.diffBest}>Best {best.toLocaleString()}</Text> : null}
