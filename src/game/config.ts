@@ -24,8 +24,11 @@ export type Difficulty = {
   words: string; // short description of the word sizes, for the picker
 };
 
+/** No word is ever longer than this, on any difficulty (longer ones don't fit the screen well). */
+export const MAX_WORD_LENGTH = 7;
+
 /**
- * Word sizes: short 3–5 letters, medium 6–8, long 9–11, extremely long 12+.
+ * Word sizes within the 7-letter cap: short 3–4 letters, medium 5–6, long 7.
  * Tune each difficulty here.
  */
 export const DIFFICULTIES: Record<DifficultyId, Difficulty> = {
@@ -36,8 +39,8 @@ export const DIFFICULTIES: Record<DifficultyId, Difficulty> = {
     startTime: 7.0,
     timeStep: 0.15,
     minTime: 2.8,
-    lengths: r => (r <= 3 ? [3, 6] : [3, 8]),
-    words: "Short to medium words",
+    lengths: r => (r <= 3 ? [3, 4] : [3, 5]),
+    words: "Short words, 3–5 letters",
   },
   medium: {
     id: "medium",
@@ -47,13 +50,12 @@ export const DIFFICULTIES: Record<DifficultyId, Difficulty> = {
     timeStep: 0.35,
     minTime: 2.5,
     lengths: r => {
-      if (r <= 2) return [3, 5];
-      if (r <= 4) return [4, 6];
-      if (r <= 7) return [4, 8];
-      if (r <= 10) return [5, 9];
-      return [6, 12];
+      if (r <= 2) return [3, 4];
+      if (r <= 4) return [3, 5];
+      if (r <= 7) return [4, 6];
+      return [4, 7];
     },
-    words: "Short, medium and long words",
+    words: "3–7 letters, longer as you go",
   },
   hard: {
     id: "hard",
@@ -62,8 +64,8 @@ export const DIFFICULTIES: Record<DifficultyId, Difficulty> = {
     startTime: 3.0,
     timeStep: 0.1,
     minTime: 1.5,
-    lengths: r => (r <= 3 ? [6, 9] : [6, 11]),
-    words: "Medium to long words",
+    lengths: () => [5, 7],
+    words: "Medium to long, 5–7 letters",
   },
   impossible: {
     id: "impossible",
@@ -72,8 +74,8 @@ export const DIFFICULTIES: Record<DifficultyId, Difficulty> = {
     startTime: 1.5,
     timeStep: 0.05,
     minTime: 1.0,
-    lengths: () => [9, 20],
-    words: "Long to extremely long words",
+    lengths: () => [6, 7],
+    words: "Longest words, 6–7 letters",
   },
 };
 

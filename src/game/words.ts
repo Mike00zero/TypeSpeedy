@@ -1,3 +1,5 @@
+import { MAX_WORD_LENGTH } from "./config";
+
 const RAW = `cat dog sun map cup hat jam box fox key pen run sky top web zip ant bat car day egg fan gum ice jar kit log mud net owl pig rug toy van wax yak
 able acid aged also area army away baby back bake ball band bank barn base bath bear beat bell belt bird blow blue boat body bold bolt bone book boot bowl brag bulb burn bush cake calm camp card cash cave chef chin city clay clip coal coat code coin cold cook cool corn crab crew crop cube dark dash dawn deal deer desk dive door dove draw drum duck dust east echo edge envy face fact fair farm fast fern film fire fish flag flip foam fog fold food fork frog fuel game gate gift glow goat gold golf grip gust hail hand harp hawk heat hike hill hint hive hook horn iris iron jazz jump kite knot lake lamp lane leaf lime lion loop luck mask maze mild milk mint moon moss mule nest note oval palm park path pear pine plum pond quiz rain reef ring road rock roof rope rose ruby sail salt sand seed ship silk snow soap sock song star swan tide tile toad tree tusk vase vine wave wolf yarn zero zone
 amber angel apple arrow badge basil beach berry blaze bloom brave bread brick brush cabin candy cargo chalk charm chess cider cloud coral crane crisp crown daisy dance delta diner dream eagle earth ember fable feast field flame flint float flute forge frost fruit ghost giant glide globe grape grass gravy heart honey horse house ivory jelly jewel juice kayak knife lemon light lunar magic mango maple march medal melon merit mirth money motor mouse music noble north ocean olive opera orbit otter panda paper peach pearl piano pilot pixel plane plaza polar prism pulse quest quiet radar raven relay ridge river robin royal salad scale scout shade shark shell shine skate slate smile snack solar spark spice spoon storm sugar swift table tiger toast topaz torch tower trail train tulip ultra union vapor vivid voice waltz whale wheat wheel yacht zebra
@@ -15,15 +17,15 @@ export const WORDS = Array.from(new Set(RAW.split(/\s+/).filter(Boolean)));
 
 /**
  * Picks a random word within a length range, avoiding recently used words.
- * `maxLetters` is the longest word that fits on this screen; the range is capped to it.
+ * The range is capped to MAX_WORD_LENGTH and to `maxLetters`, the longest word that fits on this screen.
  */
 export function pickWord(range: [number, number], recent: string[], maxLetters = Infinity): string {
   let [min, max] = range;
-  max = Math.min(max, maxLetters);
+  max = Math.min(max, maxLetters, MAX_WORD_LENGTH);
   if (min > max) min = Math.max(3, max - 2); // tiny screen: take the longest words that fit
   const inRange = WORDS.filter(w => w.length >= min && w.length <= max);
   let pool = inRange.filter(w => !recent.includes(w));
   if (pool.length === 0) pool = inRange;
-  if (pool.length === 0) pool = WORDS.filter(w => w.length <= maxLetters);
+  if (pool.length === 0) pool = WORDS.filter(w => w.length <= Math.min(maxLetters, MAX_WORD_LENGTH));
   return pool[Math.floor(Math.random() * pool.length)];
 }
