@@ -107,8 +107,8 @@ export const BOSS_NAMES = [
  * A random boss name that isn't one of the `recent` ones (the bosses already met this game,
  * most recent last). Once most names have been used, only the newest ones are avoided.
  */
-export function pickBossName(recent: string[] = []): string {
+export function pickBossName(recent: string[] = [], random: () => number = Math.random): string {
   const avoid = new Set(recent.slice(-Math.floor(BOSS_NAMES.length * 0.75)));
   const pool = BOSS_NAMES.filter(n => !avoid.has(n));
-  return pool[Math.floor(Math.random() * pool.length)];
+  return pool[Math.floor(random() * pool.length)];
 }

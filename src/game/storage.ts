@@ -45,3 +45,37 @@ export function saveDifficulty(difficulty: DifficultyId) {
 export function saveMusic(on: boolean) {
   AsyncStorage.setItem(MUSIC, on ? "1" : "0").catch(() => {});
 }
+
+/* ---------- Daily Challenge ---------- */
+
+const DAILY = "typespeedy.daily"; // the most recent daily attempt
+const DAILY_STREAK = "typespeedy.dailyStreak";
+
+export type DailyRecord = {
+  date: string; // "2026-11-16"
+  score: number;
+  round: number;
+  finished: boolean; // false while the run is in progress (or if the app closed mid-run)
+};
+
+export type DailyStreak = { count: number; lastDate: string };
+
+export async function loadDaily(): Promise<{ record: DailyRecord | null; streak: DailyStreak }> {
+  try {
+    const [r, s] = await Promise.all([AsyncStorage.getItem(DAILY), AsyncStorage.getItem(DAILY_STREAK)]);
+    return {
+      record: r ? (JSON.parse(r) as DailyRecord) : null,
+      streak: s ? (JSON.parse(s) as DailyStreak) : { count: 0, lastDate: "" },
+    };
+  } catch {
+    return { record: null, streak: { count: 0, lastDate: "" } };
+  }
+}
+
+export function saveDaily(record: DailyRecord) {
+  AsyncStorage.setItem(DAILY, JSON.stringify(record)).catch(() => {});
+}
+
+export function saveDailyStreak(streak: DailyStreak) {
+  AsyncStorage.setItem(DAILY_STREAK, JSON.stringify(streak)).catch(() => {});
+}

@@ -11,6 +11,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -39,7 +40,19 @@ import {
 import { pickWord } from "./words";
 import { bossPalette, fonts, usePalette, type Palette } from "./theme";
 import { initSounds, pauseMusic, play, playMusic, playVictory, resumeMusic, setMusicEnabled, setMuted } from "./sound";
-import { loadPrefs, saveBest, saveDifficulty, saveMusic, saveMuted, type BestScores } from "./storage";
+import {
+  loadDaily,
+  loadPrefs,
+  saveBest,
+  saveDaily,
+  saveDailyStreak,
+  saveDifficulty,
+  saveMusic,
+  saveMuted,
+  type BestScores,
+  type DailyRecord,
+  type DailyStreak,
+} from "./storage";
 import { useKeyboardHeight } from "./useKeyboardHeight";
 import {
   BONUS,
@@ -53,6 +66,16 @@ import {
   type PowerUpId,
 } from "./powerups";
 import { BOSS, bossHp, bossRange, pickBossName } from "./boss";
+import {
+  DAILY_DIFFICULTY,
+  dailyStreams,
+  freeStreams,
+  prettyDate,
+  timeUntilTomorrow,
+  todayKey,
+  yesterdayKey,
+  type RandomStreams,
+} from "./daily";
 
 type Phase = "title" | "banner" | "playing" | "between" | "paused" | "over" | "bossReward";
 type WordLook = "normal" | "solved" | "timedOut" | "skipped";
@@ -100,6 +123,8 @@ type GameState = {
   wordsTyped: number;
   fastest: { t: number; w: string } | null;
   recent: string[];
+  daily: boolean; // playing today's Daily Challenge
+  dailyDate: string;
 };
 
 const MAX_LIVES = Math.max(...DIFFICULTY_ORDER.map(id => DIFFICULTIES[id].lives));
@@ -147,6 +172,8 @@ function freshState(d: Difficulty): GameState {
     wordsTyped: 0,
     fastest: null,
     recent: [],
+    daily: false,
+    dailyDate: "",
   };
 }
 
@@ -180,6 +207,10 @@ export default function Game() {
   const [isNewBest, setIsNewBest] = useState(false);
   const [confirmQuit, setConfirmQuit] = useState(false); // pause screen: "are you sure?" step
   const [showHelp, setShowHelp] = useState(false); // start screen: the "How to play" pop-up
+  const [dailyRecord, setDailyRecord] = useState<DailyRecord | null>(null);
+  const [dailyStreak, setDailyStreak] = useState<DailyStreak>({ count: 0, lastDate: "" });
+  // Random numbers for word, boss and reward picks: seeded by the date in a Daily Challenge.
+  const rng = useRef<RandomStreams>(freeStreams());
 
   const inputRef = useRef<TextInputInstance>(null);
   const lastText = useRef("");
@@ -199,6 +230,10 @@ export default function Game() {
   /* ---------- setup ---------- */
   useEffect(() => {
     initSounds();
+    loadDaily().then(d => {
+      setDailyRecord(d.record);
+      setDailyStreak(d.streak);
+    });
     loadPrefs().then(p => {
       bestRef.current = p.best;
       setBest(p.best);
@@ -320,10 +355,29 @@ export default function Game() {
     bump();
   };
 
-  const startGame = () => {
+  const startGame = (daily = false) => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
-    Object.assign(G, freshState(DIFFICULTIES[difficultyRef.current]));
+    Object.assign(G, freshState(daily ? DAILY_DIFFICULTY : DIFFICULTIES[difficultyRef.current]));
+    if (daily) {
+      const today = todayKey();
+      if (dailyRecord?.date === today) return toTitle(); // one try per day
+      G.daily = true;
+      G.dailyDate = today;
+      rng.current = dailyStreams(today);
+      // Starting counts as today's try, even if the app closes mid-run.
+      const record = { date: today, score: 0, round: 1, finished: false };
+      setDailyRecord(record);
+      saveDaily(record);
+      const streak =
+        dailyStreak.lastDate === today
+          ? dailyStreak
+          : { count: dailyStreak.lastDate === yesterdayKey() ? dailyStreak.count + 1 : 1, lastDate: today };
+      setDailyStreak(streak);
+      saveDailyStreak(streak);
+    } else {
+      rng.current = freeStreams();
+    }
     pips.forEach(p => p.setValue(1));
     setFloats([]);
     setIsNewBest(false);
@@ -352,6 +406,7 @@ export default function Game() {
       G.inBoss ? bossRange(range) : range,
       G.recent,
       maxLettersAt(sizing.current.stageWidth, sizing.current.glyphPerPx),
+      rng.current.words,
     );
     G.recent.push(G.word);
     if (G.recent.length > 40) G.recent.shift();
@@ -390,7 +445,7 @@ export default function Game() {
     G.inBoss = true;
     G.bossMaxHp = bossHp(G.round);
     G.bossHp = G.bossMaxHp;
-    G.bossName = pickBossName(G.bossHistory);
+    G.bossName = pickBossName(G.bossHistory, rng.current.bosses);
     G.bossHistory.push(G.bossName);
     G.phase = "banner";
     G.word = "";
@@ -418,7 +473,7 @@ export default function Game() {
     playVictory(); // stops the boss music and plays the fanfare
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
     checkRewards();
-    const won = rollBonus(G.bonus);
+    const won = rollBonus(G.bonus, rng.current.bonus);
     if (!G.bonus) {
       G.bonus = won;
       later(() => addFloat(`Bonus power-up: ${BONUS_POWERUPS[won].name}`, "reward"), 700);
@@ -556,6 +611,7 @@ export default function Game() {
     playMusic(null);
     play("over");
     setIsNewBest(recordBest() && G.score > 0);
+    recordDaily();
     Keyboard.dismiss();
     popOverlay();
     bump();
@@ -572,9 +628,28 @@ export default function Game() {
   };
 
   /** Pause screen: end this run and go back to the main menu. The score still counts as a best. */
+  /** Saves today's Daily Challenge result (it was marked as started when the run began). */
+  const recordDaily = () => {
+    if (!G.daily) return;
+    const record = { date: G.dailyDate, score: G.score, round: G.round, finished: true };
+    setDailyRecord(record);
+    saveDaily(record);
+  };
+
+  const shareDaily = () => {
+    const streak = dailyStreak.count > 1 ? ` (${dailyStreak.count}-day streak)` : "";
+    Share.share({
+      message:
+        `TypeSpeedy Daily Challenge · ${prettyDate(G.dailyDate)}\n` +
+        `${G.score.toLocaleString()} points · reached round ${G.round} · ${G.bossesDefeated} boss${G.bossesDefeated === 1 ? "" : "es"} beaten${streak}\n` +
+        `Same words for everyone today. Can you beat it?`,
+    }).catch(() => {});
+  };
+
   const quitToMenu = () => {
     setConfirmQuit(false);
     recordBest();
+    recordDaily();
     Keyboard.dismiss();
     toTitle();
   };
@@ -609,7 +684,7 @@ export default function Game() {
       G.rewardsEarned++;
       G.nextRewardAt = rewardThreshold(G.rewardsEarned);
       if (G.inventory.length < REWARDS.bucketSize) {
-        const id = rollPowerUp();
+        const id = rollPowerUp(rng.current.powerups);
         G.inventory.push(id);
         later(() => addFloat(`New power-up: ${POWERUPS[id].name}`, "reward"), 280);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
@@ -800,7 +875,7 @@ export default function Game() {
     if (t.length > 40) resetInput();
   };
   const onSubmit = () => {
-    if (G.phase === "title" || G.phase === "over") startGame();
+    if (G.phase === "title" || (G.phase === "over" && !G.daily)) startGame();
     else if (G.phase === "paused") resume();
   };
 
@@ -830,7 +905,9 @@ export default function Game() {
           <Text style={s.label}>SCORE</Text>
           <Text style={s.value}>{G.score.toLocaleString()}</Text>
           <Text style={s.meta}>
-            {G.d.label} · Best {Math.max(bestHere, G.score).toLocaleString()}
+            {G.daily
+              ? `Daily · ${prettyDate(G.dailyDate)}`
+              : `${G.d.label} · Best ${Math.max(bestHere, G.score).toLocaleString()}`}
           </Text>
         </View>
         <ComboBadge c={c} streak={G.streak} pop={comboPop} />
@@ -1037,7 +1114,13 @@ export default function Game() {
             Type each word before the clock runs out. Wrong letters cost lives, every round gets faster, and a boss waits
             at the end of each one. How long can you last?
           </Text>
-          <Text style={s.label}>DIFFICULTY</Text>
+          <DailyCard
+            c={c}
+            record={dailyRecord?.date === todayKey() ? dailyRecord : null}
+            streak={dailyStreak}
+            onPlay={() => startGame(true)}
+          />
+          <Text style={s.label}>OR PICK A DIFFICULTY</Text>
           <View style={s.diffGrid} accessibilityRole="radiogroup">
             {DIFFICULTY_ORDER.map(id => (
               <DifficultyCard
@@ -1050,7 +1133,7 @@ export default function Game() {
               />
             ))}
           </View>
-          <Btn c={c} label={`Start ${G.d.label}`} onPress={startGame} />
+          <Btn c={c} label={`Start ${G.d.label}`} onPress={() => startGame()} />
           <Btn c={c} label="How to play" onPress={() => setShowHelp(true)} secondary />
         </Overlay>
       )}
@@ -1152,8 +1235,9 @@ export default function Game() {
 
       {G.phase === "over" && (
         <Overlay c={c} pop={overlayPop}>
-          <Text style={[s.eyebrow, { color: c.miss }]}>
-            {G.d.label.toUpperCase()} · {oneLife ? "GAME OVER" : "OUT OF LIVES"}
+          <Text style={[s.eyebrow, { color: G.daily ? c.gold : c.miss }]}>
+            {G.daily ? `DAILY CHALLENGE · ${prettyDate(G.dailyDate).toUpperCase()}` : `${G.d.label.toUpperCase()} · `}
+            {G.daily ? "" : oneLife ? "GAME OVER" : "OUT OF LIVES"}
           </Text>
           <Text style={s.h2}>You reached round {G.round}</Text>
           <View style={s.results}>
@@ -1174,8 +1258,21 @@ export default function Game() {
               : ""}
             {G.bestStreak >= 3 ? ` Longest streak: ${G.bestStreak} words.` : ""}
           </Text>
-          <Btn c={c} label="Play again" onPress={startGame} />
-          <Btn c={c} label="Main menu" onPress={toTitle} secondary />
+          {G.daily ? (
+            <>
+              <Text style={[s.body, { color: c.ink }]}>
+                That was today’s try. A new challenge unlocks in {timeUntilTomorrow()}.
+                {dailyStreak.count > 1 ? ` You're on a ${dailyStreak.count}-day streak.` : ""}
+              </Text>
+              <Btn c={c} label="Share result" onPress={shareDaily} />
+              <Btn c={c} label="Main menu" onPress={toTitle} secondary />
+            </>
+          ) : (
+            <>
+              <Btn c={c} label="Play again" onPress={() => startGame()} />
+              <Btn c={c} label="Main menu" onPress={toTitle} secondary />
+            </>
+          )}
         </Overlay>
       )}
     </View>
@@ -1195,6 +1292,54 @@ function powerUpColor(c: Palette, id: PowerUpId): string {
 }
 
 /** The 3-slot power-up bucket, what the next reward needs, and which effects are running. */
+/** Start screen: today's Daily Challenge, or today's result once it's been played. */
+function DailyCard({
+  c,
+  record,
+  streak,
+  onPlay,
+}: {
+  c: Palette;
+  record: DailyRecord | null; // today's attempt, if any
+  streak: DailyStreak;
+  onPlay: () => void;
+}) {
+  const s = styles(c);
+  const today = todayKey();
+  const streakText =
+    streak.count > 0 && (streak.lastDate === today || streak.lastDate === yesterdayKey())
+      ? ` · ${streak.count}-day streak`
+      : "";
+  if (record) {
+    return (
+      <View style={[s.dailyCard, s.dailyDone]} accessibilityLabel="Today's Daily Challenge is done">
+        <Text style={[s.label, { color: c.gold }]}>DAILY CHALLENGE · {prettyDate(today).toUpperCase()}</Text>
+        <Text style={s.dailyTitle}>
+          {record.finished ? `${record.score.toLocaleString()} points · round ${record.round}` : "Today's try is used up"}
+        </Text>
+        <Text style={s.slotEffect}>
+          Next challenge in {timeUntilTomorrow()}
+          {streakText}
+        </Text>
+      </View>
+    );
+  }
+  return (
+    <Pressable
+      onPress={onPlay}
+      style={({ pressed }) => [s.dailyCard, pressed && { transform: [{ scale: 0.98 }] }]}
+      accessibilityRole="button"
+      accessibilityLabel="Play today's Daily Challenge"
+    >
+      <Text style={[s.label, { color: c.gold }]}>DAILY CHALLENGE · {prettyDate(today).toUpperCase()}</Text>
+      <Text style={s.dailyTitle}>Play today’s challenge</Text>
+      <Text style={s.slotEffect}>
+        Same words for everyone today · Medium rules · one try{streakText}
+      </Text>
+    </Pressable>
+  );
+}
+
 /** Center of the top bar: the current combo multiplier and streak. */
 function ComboBadge({ c, streak, pop }: { c: Palette; streak: number; pop: Animated.Value }) {
   const s = styles(c);
@@ -1485,6 +1630,17 @@ function make(c: Palette) {
     hint: { fontFamily: fonts.body, fontSize: 13, color: c.muted, textAlign: "center" },
 
     tray: { gap: 6, marginBottom: 10 },
+    dailyCard: {
+      borderWidth: 1.5,
+      borderColor: c.gold,
+      borderRadius: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      gap: 3,
+      backgroundColor: c.surface,
+    },
+    dailyDone: { borderStyle: "dashed", backgroundColor: "transparent" },
+    dailyTitle: { fontFamily: fonts.display, fontSize: 19, color: c.ink },
     bonusSlot: {
       borderWidth: 1.5,
       borderColor: c.gold,
