@@ -5,14 +5,15 @@ import { DIFFICULTY_ORDER, type DifficultyId } from "./config";
 const BEST = "typespeedy.best"; // per difficulty: typespeedy.best.easy, ...
 const LEGACY_BEST = "typespeedy.best"; // before difficulties existed (counts as medium)
 const MUTED = "typespeedy.muted";
+const MUSIC = "typespeedy.music";
 const DIFFICULTY = "typespeedy.difficulty";
 
 export type BestScores = Record<DifficultyId, number>;
 
-export async function loadPrefs(): Promise<{ best: BestScores; muted: boolean; difficulty: DifficultyId }> {
+export async function loadPrefs(): Promise<{ best: BestScores; muted: boolean; music: boolean; difficulty: DifficultyId }> {
   const best: BestScores = { easy: 0, medium: 0, hard: 0, impossible: 0 };
   try {
-    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, DIFFICULTY];
+    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, MUSIC, DIFFICULTY];
     const pairs = await AsyncStorage.multiGet(keys);
     const get = (k: string) => pairs.find(([key]) => key === k)?.[1] ?? null;
     for (const d of DIFFICULTY_ORDER) best[d] = Number(get(`${BEST}.${d}`)) || 0;
@@ -21,10 +22,11 @@ export async function loadPrefs(): Promise<{ best: BestScores; muted: boolean; d
     return {
       best,
       muted: get(MUTED) === "1",
+      music: get(MUSIC) !== "0", // on unless turned off
       difficulty: saved && DIFFICULTY_ORDER.includes(saved) ? saved : "medium",
     };
   } catch {
-    return { best, muted: false, difficulty: "medium" };
+    return { best, muted: false, music: true, difficulty: "medium" };
   }
 }
 
@@ -38,4 +40,8 @@ export function saveMuted(muted: boolean) {
 
 export function saveDifficulty(difficulty: DifficultyId) {
   AsyncStorage.setItem(DIFFICULTY, difficulty).catch(() => {});
+}
+
+export function saveMusic(on: boolean) {
+  AsyncStorage.setItem(MUSIC, on ? "1" : "0").catch(() => {});
 }

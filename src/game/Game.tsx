@@ -24,6 +24,9 @@ import * as Haptics from "expo-haptics";
 
 import {
   CONFIG,
+  COMBO_TIERS,
+  comboMultiplier,
+  nextComboTier,
   DIFFICULTIES,
   DIFFICULTY_ORDER,
   formatSeconds,
@@ -34,13 +37,24 @@ import {
   type DifficultyId,
 } from "./config";
 import { pickWord } from "./words";
-import { fonts, usePalette, type Palette } from "./theme";
-import { initSounds, play, setMuted } from "./sound";
-import { loadPrefs, saveBest, saveDifficulty, saveMuted, type BestScores } from "./storage";
+import { bossPalette, fonts, usePalette, type Palette } from "./theme";
+import { initSounds, pauseMusic, play, playMusic, playVictory, resumeMusic, setMusicEnabled, setMuted } from "./sound";
+import { loadPrefs, saveBest, saveDifficulty, saveMusic, saveMuted, type BestScores } from "./storage";
 import { useKeyboardHeight } from "./useKeyboardHeight";
-import { POWERUPS, REWARDS, rewardThreshold, rollPowerUp, type PowerUpId } from "./powerups";
+import {
+  BONUS,
+  BONUS_POWERUPS,
+  POWERUPS,
+  REWARDS,
+  rewardThreshold,
+  rollBonus,
+  rollPowerUp,
+  type BonusId,
+  type PowerUpId,
+} from "./powerups";
+import { BOSS, bossHp, bossRange, pickBossName } from "./boss";
 
-type Phase = "title" | "banner" | "playing" | "between" | "paused" | "over";
+type Phase = "title" | "banner" | "playing" | "between" | "paused" | "over" | "bossReward";
 type WordLook = "normal" | "solved" | "timedOut" | "skipped";
 type Float = { id: number; text: string; kind: "good" | "bad" | "reward"; x: number; anim: Animated.Value };
 
@@ -69,7 +83,17 @@ type GameState = {
   shields: number; // misses/timeouts that will be blocked
   slowWords: number; // upcoming words that get Slow-Mo time
   doubleWords: number; // upcoming finished words that score double
+  tripleWords: number; // upcoming finished words that score triple (Jackpot)
   powerUpsUsed: number;
+  inBoss: boolean; // the end-of-round boss fight (including its intro)
+  bossHp: number; // words left to beat the boss
+  bossMaxHp: number;
+  bossName: string;
+  bossesDefeated: number;
+  streak: number; // words in a row with no wrong letters
+  bestStreak: number;
+  bonus: BonusId | null; // the single gold bonus slot
+  pendingBonus: BonusId | null; // a newly won bonus waiting on keep-or-swap
   keys: number;
   goodKeys: number;
   wordsTyped: number;
@@ -105,7 +129,17 @@ function freshState(d: Difficulty): GameState {
     shields: 0,
     slowWords: 0,
     doubleWords: 0,
+    tripleWords: 0,
     powerUpsUsed: 0,
+    inBoss: false,
+    bossHp: 0,
+    bossMaxHp: 0,
+    bossName: "",
+    bossesDefeated: 0,
+    streak: 0,
+    bestStreak: 0,
+    bonus: null,
+    pendingBonus: null,
     keys: 0,
     goodKeys: 0,
     wordsTyped: 0,
@@ -115,8 +149,7 @@ function freshState(d: Difficulty): GameState {
 }
 
 export default function Game() {
-  const { c, isDark } = usePalette();
-  const s = styles(c);
+  const { c: baseColors, isDark } = usePalette();
   const insets = useSafeAreaInsets();
   const kbHeight = useKeyboardHeight();
   const { width } = useWindowDimensions();
@@ -130,6 +163,9 @@ export default function Game() {
   sizing.current = { stageWidth, glyphPerPx };
 
   const G = useRef<GameState>(freshState(DIFFICULTIES.medium)).current;
+  // Boss fights switch the whole screen to the dark boss look.
+  const c = G.inBoss ? bossPalette : baseColors;
+  const s = styles(c);
   const [, setVersion] = useState(0);
   const bump = useCallback(() => setVersion(v => v + 1), []);
   const [best, setBest] = useState<BestScores>({ easy: 0, medium: 0, hard: 0, impossible: 0 });
@@ -137,8 +173,11 @@ export default function Game() {
   const [difficulty, setDifficulty] = useState<DifficultyId>("medium");
   const difficultyRef = useRef<DifficultyId>("medium");
   const [muted, setMutedState] = useState(false);
+  const [musicOn, setMusicOnState] = useState(true);
   const [floats, setFloats] = useState<Float[]>([]);
   const [isNewBest, setIsNewBest] = useState(false);
+  const [confirmQuit, setConfirmQuit] = useState(false); // pause screen: "are you sure?" step
+  const [showHelp, setShowHelp] = useState(false); // start screen: the "How to play" pop-up
 
   const inputRef = useRef<TextInputInstance>(null);
   const lastText = useRef("");
@@ -152,6 +191,7 @@ export default function Game() {
   const letterPop = useRef(new Animated.Value(1)).current;
   const pulse = useRef(new Animated.Value(1)).current;
   const overlayPop = useRef(new Animated.Value(1)).current;
+  const comboPop = useRef(new Animated.Value(1)).current;
   const pips = useRef(Array.from({ length: MAX_LIVES }, () => new Animated.Value(1))).current;
 
   /* ---------- setup ---------- */
@@ -162,6 +202,8 @@ export default function Game() {
       setBest(p.best);
       setMutedState(p.muted);
       setMuted(p.muted);
+      setMusicOnState(p.music);
+      setMusicEnabled(p.music);
       if (G.phase === "title") chooseDifficulty(p.difficulty, false);
     });
     const loop = Animated.loop(
@@ -172,7 +214,10 @@ export default function Game() {
     );
     loop.start();
     const sub = AppState.addEventListener("change", st => {
-      if (st !== "active") pause();
+      if (st !== "active") {
+        pause();
+        pauseMusic(); // also between words or during an intro
+      } else if (G.phase !== "paused") resumeMusic();
     });
     return () => {
       loop.stop();
@@ -268,6 +313,7 @@ export default function Game() {
     Object.assign(G, freshState(DIFFICULTIES[difficultyRef.current]));
     pips.forEach(p => p.setValue(1));
     setFloats([]);
+    playMusic(null);
     popOverlay();
     bump();
   };
@@ -280,6 +326,7 @@ export default function Game() {
     setFloats([]);
     setIsNewBest(false);
     focusInput();
+    playMusic("main");
     startRound();
   };
 
@@ -292,12 +339,18 @@ export default function Game() {
     fuse.setValue(1);
     popOverlay();
     if (G.round > 1) play("round");
+    playMusic("main"); // keeps going if it's already on; restarts after a boss
     bump();
     later(nextWord, 1700);
   };
 
   const nextWord = () => {
-    G.word = pickWord(G.d.lengths(G.round), G.recent, maxLettersAt(sizing.current.stageWidth, sizing.current.glyphPerPx));
+    const range = G.d.lengths(G.round);
+    G.word = pickWord(
+      G.inBoss ? bossRange(range) : range,
+      G.recent,
+      maxLettersAt(sizing.current.stageWidth, sizing.current.glyphPerPx),
+    );
     G.recent.push(G.word);
     if (G.recent.length > 40) G.recent.shift();
     G.pos = 0;
@@ -319,12 +372,81 @@ export default function Game() {
   };
 
   const advance = () => {
-    G.wordInRound++;
     if (G.lives <= 0) return gameOver();
-    if (G.wordInRound >= wordsInRound(G.round)) {
-      G.round++;
-      startRound();
-    } else nextWord();
+    if (G.inBoss) {
+      if (G.bossHp <= 0) bossDefeated();
+      else nextWord(); // a timeout or Skip doesn't hurt the boss: just a new word
+      return;
+    }
+    G.wordInRound++;
+    if (G.wordInRound >= wordsInRound(G.round)) startBoss();
+    else nextWord();
+  };
+
+  /* ---------- boss fights ---------- */
+  const startBoss = () => {
+    G.inBoss = true;
+    G.bossMaxHp = bossHp(G.round);
+    G.bossHp = G.bossMaxHp;
+    G.bossName = pickBossName(G.bossName);
+    G.phase = "banner";
+    G.word = "";
+    fuse.stopAnimation();
+    fuse.setValue(1);
+    popOverlay();
+    play("timeout");
+    playMusic("boss");
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+    bump();
+    later(nextWord, BOSS.introMs);
+  };
+
+  const nextRound = () => {
+    G.round++;
+    startRound();
+  };
+
+  const bossDefeated = () => {
+    G.inBoss = false;
+    G.bossesDefeated++;
+    const pts = BOSS.bonusPointsPerRound * G.round;
+    G.score += pts;
+    addFloat(`${G.bossName} defeated! +${pts}`, "reward");
+    playVictory(); // stops the boss music and plays the fanfare
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    checkRewards();
+    const won = rollBonus(G.bonus);
+    if (!G.bonus) {
+      G.bonus = won;
+      later(() => addFloat(`Bonus power-up: ${BONUS_POWERUPS[won].name}`, "reward"), 700);
+      later(nextRound, 2600); // let the victory fanfare finish first
+    } else {
+      // Only one bonus can be held: ask whether to keep it or take the new one.
+      G.pendingBonus = won;
+      G.phase = "bossReward";
+      Keyboard.dismiss();
+      popOverlay();
+      // Don't leave the choice screen silent: bring the main theme back once the fanfare is done.
+      later(() => {
+        if (G.phase === "bossReward") playMusic("main");
+      }, 2600);
+    }
+    bump();
+  };
+
+  const chooseBonus = (takeNew: boolean) => {
+    if (G.phase !== "bossReward") return;
+    if (takeNew && G.pendingBonus) G.bonus = G.pendingBonus;
+    G.pendingBonus = null;
+    focusInput();
+    nextRound();
+  };
+
+  /** A wrong letter or timeout ends the streak. */
+  const breakCombo = () => {
+    if (G.streak === 0) return;
+    if (comboMultiplier(G.streak) > 1) later(() => addFloat("Combo lost", "bad"), 250);
+    G.streak = 0;
   };
 
   const handleChar = (raw: string) => {
@@ -342,6 +464,7 @@ export default function Game() {
     } else {
       G.wordMisses++;
       G.missed.add(G.pos);
+      breakCombo(); // even when a Shield saves the life
       G.wrongAt = G.pos;
       letterPop.setValue(1.35);
       Animated.spring(letterPop, { toValue: 1, friction: 4, useNativeDriver: true }).start();
@@ -367,18 +490,38 @@ export default function Game() {
   const solved = () => {
     const used = (Date.now() - G.wordStart) / 1000;
     let pts = scoreWord(G.round, used, G.wordLimit, G.wordMisses);
-    const doubled = G.doubleWords > 0;
-    if (doubled) {
-      pts *= 2;
+    let mult = 1;
+    if (G.doubleWords > 0) {
+      mult *= 2;
       G.doubleWords--;
     }
+    if (G.tripleWords > 0) {
+      mult *= 3;
+      G.tripleWords--;
+    }
+    // Combo: a flawless word extends the streak, and the streak sets a points multiplier.
+    const before = comboMultiplier(G.streak);
+    if (G.wordMisses === 0) {
+      G.streak++;
+      G.bestStreak = Math.max(G.bestStreak, G.streak);
+    }
+    const combo = comboMultiplier(G.streak);
+    if (combo > before) {
+      later(() => addFloat(`Combo ×${combo}!`, "reward"), 300);
+      comboPop.setValue(1.5);
+      Animated.spring(comboPop, { toValue: 1, friction: 4, useNativeDriver: true }).start();
+    }
+    pts = Math.round(pts * mult * combo);
     G.score += pts;
+    if (G.inBoss) G.bossHp = Math.max(0, G.bossHp - 1);
     G.wordsTyped++;
     if (!G.fastest || used < G.fastest.t) G.fastest = { t: used, w: G.word };
     G.phase = "between";
     G.look = "solved";
     fuse.stopAnimation();
-    addFloat(`+${pts}${doubled ? " (2×)" : ""}${G.wordMisses === 0 ? " flawless" : ""}`, "good");
+    const hit = G.inBoss ? (G.bossHp > 0 ? " · hit!" : " · final blow!") : "";
+    const tags = [mult > 1 ? `${mult}×` : "", combo > 1 ? `combo ×${combo}` : ""].filter(Boolean).join(", ");
+    addFloat(`+${pts}${tags ? ` (${tags})` : ""}${G.wordMisses === 0 && !hit && !tags ? " flawless" : ""}${hit}`, "good");
     play("word");
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     checkRewards();
@@ -390,6 +533,7 @@ export default function Game() {
     G.phase = "between";
     G.look = "timedOut";
     G.wrongAt = null;
+    breakCombo();
     play("timeout");
     if (G.shields > 0) {
       G.shields--;
@@ -406,18 +550,30 @@ export default function Game() {
     if (G.phase === "over") return;
     G.phase = "over";
     fuse.stopAnimation();
+    playMusic(null);
     play("over");
-    const id = G.d.id;
-    const newBest = G.score > bestRef.current[id];
-    if (newBest) {
-      bestRef.current = { ...bestRef.current, [id]: G.score };
-      setBest(bestRef.current);
-      saveBest(id, G.score);
-    }
-    setIsNewBest(newBest && G.score > 0);
+    setIsNewBest(recordBest() && G.score > 0);
     Keyboard.dismiss();
     popOverlay();
     bump();
+  };
+
+  /** Saves the score as this difficulty's best if it beats it. Returns whether it did. */
+  const recordBest = () => {
+    const id = G.d.id;
+    if (G.score <= bestRef.current[id]) return false;
+    bestRef.current = { ...bestRef.current, [id]: G.score };
+    setBest(bestRef.current);
+    saveBest(id, G.score);
+    return true;
+  };
+
+  /** Pause screen: end this run and go back to the main menu. The score still counts as a best. */
+  const quitToMenu = () => {
+    setConfirmQuit(false);
+    recordBest();
+    Keyboard.dismiss();
+    toTitle();
   };
 
   const pause = () => {
@@ -426,6 +582,8 @@ export default function Game() {
       G.pausedRemaining = v;
     });
     G.phase = "paused";
+    setConfirmQuit(false);
+    pauseMusic();
     popOverlay();
     bump();
   };
@@ -436,6 +594,7 @@ export default function Game() {
     G.wordStart = Date.now() - elapsedFrac * G.wordLimit * 1000;
     G.frozen = false; // pausing uses up what was left of a Freeze
     G.phase = "playing";
+    resumeMusic();
     focusInput();
     runClock(G.pausedRemaining);
     bump();
@@ -475,6 +634,86 @@ export default function Game() {
     }
   };
 
+  /** Slow-Mo time for `words` words, starting with the current one. */
+  const slowFor = (words: number) => {
+    const slowLimit = G.limit * REWARDS.slowFactor;
+    if (G.wordLimit >= slowLimit) {
+      G.slowWords += words; // this word is already slowed; extend to more words
+    } else {
+      const left = remainingSeconds() + (slowLimit - G.wordLimit);
+      G.wordLimit = slowLimit;
+      G.slowWords += words - 1; // the current word is the first of them
+      setClock(left);
+    }
+  };
+
+  /** Stops the clock for `seconds`. Returns a message if it's already frozen. */
+  const freezeFor = (seconds: number): string | null => {
+    if (G.frozen) return "Clock is already frozen";
+    const frac = remainingSeconds() / G.wordLimit;
+    fuse.stopAnimation();
+    fuse.setValue(frac);
+    G.pausedRemaining = frac;
+    G.frozen = true;
+    const wordId = G.wordId;
+    later(() => {
+      if (!G.frozen || G.wordId !== wordId || G.phase !== "playing") return;
+      G.frozen = false;
+      setClock(G.pausedRemaining * G.wordLimit);
+      bump();
+    }, seconds * 1000);
+    return null;
+  };
+
+  /** Applies a bonus power-up. Returns a message if it can't be used right now. */
+  const applyBonus = (id: BonusId): string | null => {
+    switch (id) {
+      case "megaLife": {
+        if (G.lives >= MAX_LIVES) return "Lives are full";
+        const before = G.lives;
+        G.lives = Math.min(MAX_LIVES, G.lives + BONUS.megaLives);
+        for (let i = before; i < G.lives; i++) {
+          pips[i].setValue(1.8);
+          Animated.spring(pips[i], { toValue: 1, friction: 4, useNativeDriver: true }).start();
+        }
+        return null;
+      }
+      case "timeWarp":
+        slowFor(BONUS.warpWords);
+        return null;
+      case "fortress":
+        G.shields += BONUS.fortressShields;
+        return null;
+      case "jackpot":
+        G.tripleWords += BONUS.jackpotWords;
+        return null;
+      case "deepFreeze":
+        return freezeFor(BONUS.deepFreezeSeconds);
+      case "autoType":
+        G.pos = G.word.length;
+        G.wrongAt = null;
+        solved(); // counts as finishing the word (a hit, in a boss fight)
+        return null;
+    }
+  };
+
+  const activateBonus = () => {
+    if (G.phase !== "playing" || !G.bonus) return;
+    const id = G.bonus;
+    const blocked = applyBonus(id);
+    if (blocked) {
+      addFloat(blocked, "bad");
+    } else {
+      G.bonus = null;
+      G.powerUpsUsed++;
+      addFloat(BONUS_POWERUPS[id].name, "reward");
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      play("round");
+    }
+    focusInput();
+    bump();
+  };
+
   /** Applies a power-up. Returns a message if it can't be used right now (it stays in the bucket). */
   const applyPowerUp = (id: PowerUpId): string | null => {
     switch (id) {
@@ -497,37 +736,14 @@ export default function Game() {
         fuse.stopAnimation();
         later(advance, 220);
         return null;
-      case "slow": {
-        const slowLimit = G.limit * REWARDS.slowFactor;
-        if (G.wordLimit >= slowLimit) {
-          G.slowWords += REWARDS.slowWords; // this word is already slowed; extend to more words
-        } else {
-          const left = remainingSeconds() + (slowLimit - G.wordLimit);
-          G.wordLimit = slowLimit;
-          G.slowWords += REWARDS.slowWords - 1; // the current word is the first of them
-          setClock(left);
-        }
+      case "slow":
+        slowFor(REWARDS.slowWords);
         return null;
-      }
       case "shield":
         G.shields++;
         return null;
-      case "freeze": {
-        if (G.frozen) return "Clock is already frozen";
-        const frac = remainingSeconds() / G.wordLimit;
-        fuse.stopAnimation();
-        fuse.setValue(frac);
-        G.pausedRemaining = frac;
-        G.frozen = true;
-        const wordId = G.wordId;
-        later(() => {
-          if (!G.frozen || G.wordId !== wordId || G.phase !== "playing") return;
-          G.frozen = false;
-          setClock(G.pausedRemaining * G.wordLimit);
-          bump();
-        }, REWARDS.freezeSeconds * 1000);
-        return null;
-      }
+      case "freeze":
+        return freezeFor(REWARDS.freezeSeconds);
       case "double":
         G.doubleWords += REWARDS.doubleWords;
         return null;
@@ -552,6 +768,13 @@ export default function Game() {
     bump();
   };
 
+  const toggleMusic = () => {
+    const on = !musicOn;
+    setMusicOnState(on);
+    setMusicEnabled(on);
+    saveMusic(on);
+  };
+
   const toggleMute = () => {
     const m = !muted;
     setMutedState(m);
@@ -568,6 +791,7 @@ export default function Game() {
     if (G.phase === "paused" && added) resume();
     for (const ch of added) {
       if (ch >= "1" && ch <= String(REWARDS.bucketSize)) activatePowerUp(Number(ch) - 1);
+      else if (ch === String(REWARDS.bucketSize + 1)) activateBonus();
       else handleChar(ch);
     }
     if (t.length > 40) resetInput();
@@ -595,7 +819,7 @@ export default function Game() {
 
   return (
     <View style={[s.root, { paddingTop: insets.top + 12, paddingBottom: Math.max(insets.bottom, kbHeight) + 12 }]}>
-      <StatusBar style={isDark ? "light" : "dark"} />
+      <StatusBar style={isDark || G.inBoss ? "light" : "dark"} />
 
       {/* HUD */}
       <View style={s.hud}>
@@ -606,11 +830,12 @@ export default function Game() {
             {G.d.label} · Best {Math.max(bestHere, G.score).toLocaleString()}
           </Text>
         </View>
+        <ComboBadge c={c} streak={G.streak} pop={comboPop} />
         <View style={[s.stat, { alignItems: "flex-end" }]}>
           <Text style={s.label}>ROUND</Text>
           <Text style={s.value}>{G.round}</Text>
           <Text style={s.meta}>
-            word {Math.min(G.wordInRound + 1, total)} of {total}
+            {G.inBoss ? `boss · ${G.bossHp} of ${G.bossMaxHp} HP` : `word ${Math.min(G.wordInRound + 1, total)} of ${total}`}
           </Text>
         </View>
       </View>
@@ -634,6 +859,19 @@ export default function Game() {
           })}
         </View>
       </View>
+
+      {G.inBoss && G.phase !== "banner" && (
+        <View style={s.bossBar} accessibilityLabel={`${G.bossName}: ${G.bossHp} of ${G.bossMaxHp} health left`}>
+          <Text style={[s.label, { color: c.miss }]} numberOfLines={1}>
+            BOSS · {G.bossName.toUpperCase()}
+          </Text>
+          <View style={s.bossHpRow}>
+            {Array.from({ length: G.bossMaxHp }, (_, i) => (
+              <View key={i} style={[s.bossHpSeg, { backgroundColor: i < G.bossHp ? c.miss : c.line }]} />
+            ))}
+          </View>
+        </View>
+      )}
 
       {/* Stage */}
       <Pressable
@@ -730,7 +968,7 @@ export default function Game() {
         </Text>
       </Pressable>
 
-      <PowerUpTray c={c} G={G} onUse={activatePowerUp} />
+      <PowerUpTray c={c} G={G} onUse={activatePowerUp} onUseBonus={activateBonus} />
 
       <View style={s.controls}>
         <Pressable style={s.chip} onPress={() => (G.phase === "paused" ? resume() : pause())} hitSlop={8}>
@@ -738,6 +976,9 @@ export default function Game() {
         </Pressable>
         <Pressable style={s.chip} onPress={toggleMute} hitSlop={8}>
           <Text style={s.chipText}>{muted ? "SOUND OFF" : "SOUND ON"}</Text>
+        </Pressable>
+        <Pressable style={s.chip} onPress={toggleMusic} hitSlop={8}>
+          <Text style={s.chipText}>{musicOn ? "MUSIC ON" : "MUSIC OFF"}</Text>
         </Pressable>
       </View>
 
@@ -789,6 +1030,10 @@ export default function Game() {
             <Text style={{ color: c.ink }}>v</Text>
             <Text style={{ color: c.ghost }}>al</Text>
           </Text>
+          <Text style={s.body}>
+            Type each word before the clock runs out. Wrong letters cost lives, every round gets faster, and a boss waits
+            at the end of each one. How long can you last?
+          </Text>
           <Text style={s.label}>DIFFICULTY</Text>
           <View style={s.diffGrid} accessibilityRole="radiogroup">
             {DIFFICULTY_ORDER.map(id => (
@@ -802,6 +1047,15 @@ export default function Game() {
               />
             ))}
           </View>
+          <Btn c={c} label={`Start ${G.d.label}`} onPress={startGame} />
+          <Btn c={c} label="How to play" onPress={() => setShowHelp(true)} secondary />
+        </Overlay>
+      )}
+
+      {G.phase === "title" && showHelp && (
+        <Overlay c={c} pop={overlayPop}>
+          <Text style={s.eyebrow}>HOW TO PLAY</Text>
+          <Text style={s.h2}>The rules</Text>
           <Rule c={c} k="POINTS" v="Every word you finish scores. Faster and flawless words score more." />
           <Rule
             c={c}
@@ -815,15 +1069,37 @@ export default function Game() {
           <Rule c={c} k="ROUNDS" v="Ten words a round. The clock gets shorter every round, and late rounds get longer." />
           <Rule
             c={c}
+            k="COMBO"
+            v={`Finish words with no wrong letters to build a streak: ${COMBO_TIERS.map(t => `${t.at} in a row for ×${t.mult}`).join(", ")}. A wrong letter or a timeout resets it.`}
+          />
+          <Rule
+            c={c}
+            k="BOSSES"
+            v="Every round ends with a boss. Type its words to beat it and win a gold bonus power-up, even if your bucket is full. You can hold one bonus at a time."
+          />
+          <Rule
+            c={c}
             k="REWARDS"
             v="Score points to earn power-ups like extra lives, more time and skips. Hold up to 3 and tap one to use it. While your bucket is full, new rewards are lost."
           />
-          <Btn c={c} label={`Start ${G.d.label}`} onPress={startGame} />
+          <Btn c={c} label="Got it" onPress={() => setShowHelp(false)} />
         </Overlay>
       )}
 
       {G.phase === "banner" && (
         <View style={[StyleSheet.absoluteFill, s.bannerWrap]} pointerEvents="none">
+          {G.inBoss ? (
+            <Animated.View style={[s.banner, { transform: [{ scale: overlayPop }] }]}>
+              <Text style={[s.label, { color: c.miss, letterSpacing: 4 }]}>BOSS FIGHT</Text>
+              <Text style={s.bossName}>{G.bossName}</Text>
+              <Text style={s.bannerSub}>
+                Type <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{G.bossMaxHp}</Text> words to
+                defeat it ·{" "}
+                <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{formatSeconds(G.limit)}</Text> per word
+              </Text>
+              <Text style={[s.bannerNote, { color: c.gold }]}>Win a gold bonus power-up</Text>
+            </Animated.View>
+          ) : (
           <Animated.View style={[s.banner, { transform: [{ scale: overlayPop }] }]}>
             <Text style={s.label}>ROUND</Text>
             <Text style={s.bannerBig}>{G.round}</Text>
@@ -833,7 +1109,20 @@ export default function Game() {
             </Text>
             {bannerNote ? <Text style={s.bannerNote}>{bannerNote}</Text> : null}
           </Animated.View>
+          )}
         </View>
+      )}
+
+      {G.phase === "bossReward" && G.bonus && G.pendingBonus && (
+        <Overlay c={c} pop={overlayPop}>
+          <Text style={[s.eyebrow, { color: c.gold }]}>BOSS DEFEATED</Text>
+          <Text style={s.h2}>Keep or swap?</Text>
+          <Text style={s.body}>You won a new bonus power-up, but you can only hold one.</Text>
+          <BonusCard c={c} tag="NEW" id={G.pendingBonus} />
+          <BonusCard c={c} tag="YOU HAVE" id={G.bonus} />
+          <Btn c={c} label={`Take ${BONUS_POWERUPS[G.pendingBonus].name}`} onPress={() => chooseBonus(true)} />
+          <Btn c={c} label={`Keep ${BONUS_POWERUPS[G.bonus].name}`} onPress={() => chooseBonus(false)} secondary />
+        </Overlay>
       )}
 
       {G.phase === "paused" && (
@@ -841,7 +1130,20 @@ export default function Game() {
           <Text style={s.eyebrow}>PAUSED</Text>
           <Text style={s.h2}>Take a breath</Text>
           <Text style={s.body}>The clock is stopped. Your word will be waiting.</Text>
-          <Btn c={c} label="Resume" onPress={resume} />
+          {confirmQuit ? (
+            <>
+              <Text style={[s.body, { color: c.ink }]}>
+                Quit this run? Your score of {G.score.toLocaleString()} still counts toward your best.
+              </Text>
+              <Btn c={c} label="Yes, quit to main menu" onPress={quitToMenu} />
+              <Btn c={c} label="Keep playing" onPress={resume} secondary />
+            </>
+          ) : (
+            <>
+              <Btn c={c} label="Resume" onPress={resume} />
+              <Btn c={c} label="Quit to main menu" onPress={() => setConfirmQuit(true)} secondary />
+            </>
+          )}
         </Overlay>
       )}
 
@@ -864,9 +1166,13 @@ export default function Game() {
           </View>
           <Text style={s.body}>
             {G.fastest ? `Your quickest was “${G.fastest.w}”.` : "Finish a word to get on the board."}
+            {G.bossesDefeated > 0
+              ? ` You beat ${G.bossesDefeated} boss${G.bossesDefeated > 1 ? "es" : ""}.`
+              : ""}
+            {G.bestStreak >= 3 ? ` Longest streak: ${G.bestStreak} words.` : ""}
           </Text>
           <Btn c={c} label="Play again" onPress={startGame} />
-          <Btn c={c} label="Change difficulty" onPress={toTitle} secondary />
+          <Btn c={c} label="Main menu" onPress={toTitle} secondary />
         </Overlay>
       )}
     </View>
@@ -886,7 +1192,47 @@ function powerUpColor(c: Palette, id: PowerUpId): string {
 }
 
 /** The 3-slot power-up bucket, what the next reward needs, and which effects are running. */
-function PowerUpTray({ c, G, onUse }: { c: Palette; G: GameState; onUse: (slot: number) => void }) {
+/** Center of the top bar: the current combo multiplier and streak. */
+function ComboBadge({ c, streak, pop }: { c: Palette; streak: number; pop: Animated.Value }) {
+  const s = styles(c);
+  const mult = comboMultiplier(streak);
+  const next = nextComboTier(streak);
+  const active = mult > 1;
+  return (
+    <View style={[s.stat, s.combo]} accessibilityLabel={`Combo ${mult} times, streak ${streak}`}>
+      <Text style={[s.label, active && { color: c.gold }]}>COMBO</Text>
+      <Animated.Text style={[s.value, { color: active ? c.gold : c.ghost, transform: [{ scale: pop }] }]}>
+        ×{mult}
+      </Animated.Text>
+      <Text style={s.meta} numberOfLines={1}>
+        {next ? `${streak} · ${next.at - streak} to ×${next.mult}` : `${streak} · max`}
+      </Text>
+    </View>
+  );
+}
+
+function BonusCard({ c, tag, id }: { c: Palette; tag: string; id: BonusId }) {
+  const s = styles(c);
+  return (
+    <View style={[s.bonusSlot, { borderStyle: "solid" }]}>
+      <Text style={[s.label, { color: c.gold }]}>{tag}</Text>
+      <Text style={[s.slotName, { color: c.gold }]}>{BONUS_POWERUPS[id].name}</Text>
+      <Text style={s.slotEffect}>{BONUS_POWERUPS[id].effect}</Text>
+    </View>
+  );
+}
+
+function PowerUpTray({
+  c,
+  G,
+  onUse,
+  onUseBonus,
+}: {
+  c: Palette;
+  G: GameState;
+  onUse: (slot: number) => void;
+  onUseBonus: () => void;
+}) {
   const s = styles(c);
   const full = G.inventory.length >= REWARDS.bucketSize;
   const canUse = G.phase === "playing";
@@ -896,6 +1242,7 @@ function PowerUpTray({ c, G, onUse }: { c: Palette; G: GameState; onUse: (slot: 
   if (G.shields > 0) active.push({ text: G.shields > 1 ? `Shield ×${G.shields}` : "Shield on", color: c.violet });
   if (slowLeft > 0) active.push({ text: `Slow-Mo · ${slowLeft} word${slowLeft > 1 ? "s" : ""}`, color: c.good });
   if (G.doubleWords > 0) active.push({ text: `2× points · ${G.doubleWords} word${G.doubleWords > 1 ? "s" : ""}`, color: c.gold });
+  if (G.tripleWords > 0) active.push({ text: `3× points · ${G.tripleWords} word${G.tripleWords > 1 ? "s" : ""}`, color: c.gold });
 
   return (
     <View style={s.tray}>
@@ -905,6 +1252,29 @@ function PowerUpTray({ c, G, onUse }: { c: Palette; G: GameState; onUse: (slot: 
           {full ? "Bucket full · use one to earn more" : `Next at ${G.nextRewardAt.toLocaleString()} pts`}
         </Text>
       </View>
+      {G.bonus ? (
+        <Pressable
+          onPress={onUseBonus}
+          disabled={!canUse}
+          style={({ pressed }) => [s.bonusSlot, { opacity: canUse ? 1 : 0.5 }, pressed && { transform: [{ scale: 0.98 }] }]}
+          accessibilityRole="button"
+          accessibilityLabel={`Use bonus ${BONUS_POWERUPS[G.bonus].name}: ${BONUS_POWERUPS[G.bonus].effect}`}
+        >
+          <View style={s.bonusRow}>
+            <Text style={[s.label, { color: c.gold }]}>BONUS</Text>
+            <Text style={[s.slotName, { color: c.gold }]} numberOfLines={1}>
+              {BONUS_POWERUPS[G.bonus].name}
+            </Text>
+          </View>
+          <Text style={s.slotEffect} numberOfLines={1}>
+            {BONUS_POWERUPS[G.bonus].effect}
+          </Text>
+        </Pressable>
+      ) : (
+        <View style={[s.bonusSlot, s.bonusEmpty]}>
+          <Text style={[s.slotEmptyText, { color: c.gold, opacity: 0.7 }]}>Beat a boss to win a gold bonus</Text>
+        </View>
+      )}
       <View style={s.slots}>
         {Array.from({ length: REWARDS.bucketSize }, (_, i) => {
           const id = G.inventory[i];
@@ -1086,7 +1456,8 @@ function styles(c: Palette) {
 function make(c: Palette) {
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: c.bg, paddingHorizontal: 18 },
-    hud: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end" },
+    hud: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", gap: 8 },
+    combo: { alignItems: "center", flexShrink: 1 },
     stat: { gap: 2 },
     label: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1.3, color: c.muted },
     value: { fontFamily: fonts.display, fontSize: 30, lineHeight: 34, color: c.ink, fontVariant: ["tabular-nums"] },
@@ -1111,6 +1482,29 @@ function make(c: Palette) {
     hint: { fontFamily: fonts.body, fontSize: 13, color: c.muted, textAlign: "center" },
 
     tray: { gap: 6, marginBottom: 10 },
+    bonusSlot: {
+      borderWidth: 1.5,
+      borderColor: c.gold,
+      borderRadius: 12,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      backgroundColor: c.surface,
+      gap: 1,
+    },
+    bonusRow: { flexDirection: "row", alignItems: "baseline", gap: 8 },
+    bonusEmpty: { borderStyle: "dashed", backgroundColor: "transparent", alignItems: "center", paddingVertical: 8 },
+    bossBar: { marginTop: 14, gap: 6, alignItems: "center" },
+    bossHpRow: { flexDirection: "row", gap: 6, alignSelf: "stretch", justifyContent: "center" },
+    bossHpSeg: { flex: 1, maxWidth: 70, height: 10, borderRadius: 3 },
+    bossName: {
+      fontFamily: fonts.display,
+      fontSize: 44,
+      lineHeight: 48,
+      color: c.ink,
+      textAlign: "center",
+      letterSpacing: -1,
+      paddingHorizontal: 12,
+    },
     trayHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", gap: 10 },
     slots: { flexDirection: "row", gap: 8 },
     slot: {

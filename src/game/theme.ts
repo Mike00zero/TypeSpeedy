@@ -57,6 +57,26 @@ const dark: Palette = {
   violet: "#B595FF",
 };
 
+/** Boss fights: one dark ember-and-crimson look, whatever the system theme. */
+export const bossPalette: Palette = {
+  bg: "#12060A",
+  surface: "#1E0B11",
+  ink: "#F7E8EA",
+  muted: "#B48A93",
+  ghost: "#5C3741",
+  line: "#3B1A22",
+  accent: "#FF7A2F",
+  accentSoft: "rgba(255, 122, 47, 0.14)",
+  onAccent: "#12060A",
+  good: "#FFB547",
+  miss: "#FF3355",
+  missSoft: "rgba(255, 51, 85, 0.2)",
+  scrim: "rgba(18, 6, 10, 0.92)",
+  gold: "#F2C14E",
+  ice: "#5CC8EC",
+  violet: "#C9A8FF",
+};
+
 export const fonts = {
   display: "BricolageGrotesque_800ExtraBold",
   displayMedium: "BricolageGrotesque_500Medium",
