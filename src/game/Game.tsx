@@ -25,6 +25,16 @@ import { StatusBar } from "expo-status-bar";
 import * as Haptics from "expo-haptics";
 import { buzz, setHapticsEnabled } from "./haptics";
 import appConfig from "../../app.json";
+import {
+  EMPTY_TOWER,
+  PHOENIX,
+  TOWER,
+  isCheckpointFloor,
+  nextCheckpoint,
+  towerTier,
+  type TowerProgress,
+} from "./tower";
+import { EMPTY_SPRINT, MODES, MODE_BY_ID, SPRINT, wpm, type GameMode, type SprintBest } from "./modes";
 
 import {
   CONFIG,
@@ -59,6 +69,8 @@ import { initSounds, pauseMusic, play, playMusic, playVictory, resumeMusic, setM
 import {
   loadAchievements,
   loadDaily,
+  loadSprint,
+  loadTower,
   loadPrefs,
   saveAchievements,
   saveBest,
@@ -70,6 +82,9 @@ import {
   resetStats,
   saveEffects,
   saveHaptics,
+  saveMode,
+  saveSprint,
+  saveTower,
   saveMusic,
   saveMuted,
   savePack,
@@ -181,6 +196,16 @@ type GameState = {
   newAchievements: string[]; // names unlocked this game, for the game-over screen
   newUnlocks: string[]; // themes and word packs unlocked this game
   pack: string[] | null; // this game's word pack (null = the standard list)
+  mode: GameMode; // in Tower Climb, `round` is the floor
+  startFloor: number;
+  floorCleared: number; // highest floor cleared this climb
+  towerTop: boolean; // cleared floor 100 this climb
+  phoenix: boolean; // Phoenix Feather ready (Survival, after topping the Tower)
+  // Sprint: one clock for the whole game (wordStart/wordLimit), so words are timed from wordShownAt
+  clockStarted: boolean;
+  wordShownAt: number;
+  pausedAt: number;
+  lettersTyped: number; // letters in finished words, for words per minute
   careerSaved: boolean; // this game's totals were added to the lifetime stats
 };
 
@@ -245,6 +270,15 @@ function freshState(d: Difficulty): GameState {
     newAchievements: [],
     newUnlocks: [],
     pack: null,
+    mode: "classic",
+    startFloor: 1,
+    floorCleared: 0,
+    towerTop: false,
+    phoenix: false,
+    clockStarted: false,
+    wordShownAt: 0,
+    pausedAt: 0,
+    lettersTyped: 0,
     careerSaved: true, // nothing to save until a game starts
   };
 }
@@ -256,6 +290,13 @@ export default function Game() {
   const packRef = useRef<PackId>("classic");
   const [showCustomize, setShowCustomize] = useState(false);
   const [showStats, setShowStats] = useState(false);
+  const [mode, setModeState] = useState<GameMode>("classic");
+  const modeRef = useRef<GameMode>("classic");
+  const [tower, setTower] = useState<TowerProgress>(EMPTY_TOWER);
+  const towerRef = useRef<TowerProgress>(EMPTY_TOWER);
+  const [sprintBest, setSprintBest] = useState<SprintBest>(EMPTY_SPRINT);
+  const sprintBestRef = useRef<SprintBest>(EMPTY_SPRINT);
+  const [showModes, setShowModes] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [confirmReset, setConfirmReset] = useState<"stats" | "achievements" | null>(null);
   const [hapticsOn, setHapticsOn] = useState(true);
@@ -325,6 +366,14 @@ export default function Game() {
   /* ---------- setup ---------- */
   useEffect(() => {
     initSounds();
+    loadSprint().then(b => {
+      sprintBestRef.current = b;
+      setSprintBest(b);
+    });
+    loadTower().then(t => {
+      towerRef.current = t;
+      setTower(t);
+    });
     Promise.all([loadDaily(), loadAchievements()]).then(([d, a]) => {
       setDailyRecord(d.record);
       setDailyStreak(d.streak);
@@ -343,6 +392,8 @@ export default function Game() {
       setMuted(p.muted);
       setMusicOnState(p.music);
       setMusicEnabled(p.music);
+      setModeState(p.mode);
+      modeRef.current = p.mode;
       setHapticsOn(p.haptics);
       setHapticsEnabled(p.haptics);
       setEffectsOn(p.effects);
@@ -428,6 +479,7 @@ export default function Game() {
   const runStats = (): RunStats | null => {
     if (G.phase === "title") return null;
     return {
+      mode: G.mode,
       difficulty: G.d.id,
       daily: G.daily,
       over: G.phase === "over",
@@ -450,6 +502,9 @@ export default function Game() {
       fastestMid: G.fastestMid,
       keys: G.keys,
       goodKeys: G.goodKeys,
+      startFloor: G.startFloor,
+      floorCleared: G.floorCleared,
+      towerTop: G.towerTop,
     };
   };
 
@@ -527,8 +582,71 @@ export default function Game() {
       easing: Easing.linear,
       useNativeDriver: true,
     }).start(({ finished }) => {
-      if (finished && G.wordId === id && G.phase === "playing") timedOut();
+      if (!finished) return;
+      if (G.mode === "sprint") {
+        if (G.phase !== "over" && G.phase !== "paused" && G.phase !== "title") gameOver(); // time's up
+        return;
+      }
+      if (G.wordId === id && G.phase === "playing") timedOut();
     });
+  };
+
+  /* ---------- modes ---------- */
+  const inTower = () => G.mode === "tower";
+  const inSprint = () => G.mode === "sprint";
+  /** The Survival round that sets the clock and word lengths (a Tower floor maps onto one). */
+  const tier = () => (inTower() ? towerTier(G.round) : G.round);
+  const maxLives = () => (inTower() ? TOWER.maxLives : MAX_LIVES);
+
+  const chooseMode = (m: GameMode) => {
+    modeRef.current = m;
+    setModeState(m);
+    saveMode(m);
+    setShowModes(false);
+    buzz.select().catch(() => {});
+  };
+
+  /** Sprint: a wrong letter takes time off the clock. */
+  const sprintPenalty = () => {
+    const left = remainingSeconds() - SPRINT.missPenalty;
+    addFloat(`−${SPRINT.missPenalty}s`, "bad", G.pos);
+    hitEffects();
+    if (left <= 0) {
+      fuse.stopAnimation();
+      fuse.setValue(0);
+      G.phase = "between";
+      later(gameOver, 400);
+    } else setClock(left);
+  };
+
+  const updateTower = (t: TowerProgress) => {
+    towerRef.current = t;
+    setTower(t);
+    saveTower(t);
+  };
+
+  /** Phoenix Feather: on losing the last life, come back once. Returns true if it saved the game. */
+  const tryPhoenix = () => {
+    if (!G.phoenix || G.lives > 0) return false;
+    G.phoenix = false;
+    G.lives = PHOENIX.lives;
+    for (let i = 0; i < G.lives; i++) {
+      pips[i].setValue(1.8);
+      Animated.spring(pips[i], { toValue: 1, friction: 4, useNativeDriver: true }).start();
+    }
+    later(() => addFloat(`Phoenix Feather! Back with ${PHOENIX.lives} lives`, "reward"), 200);
+    play("round");
+    buzz.notify(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    return true;
+  };
+
+  /** Clearing floor 100: the climb is won. */
+  const towerComplete = () => {
+    G.towerTop = true;
+    G.floorCleared = TOWER.floors;
+    updateTower({ ...towerRef.current, checkpoint: 0, best: TOWER.floors, cleared: true });
+    checkAchievements();
+    gameOver();
   };
 
   /* ---------- flow ---------- */
@@ -565,8 +683,32 @@ export default function Game() {
     saveCareer(); // "Play again" straight from game over
     timers.current.forEach(clearTimeout);
     timers.current = [];
-    Object.assign(G, freshState(daily ? DAILY_DIFFICULTY : DIFFICULTIES[difficultyRef.current]));
+    const climbing = !daily && modeRef.current === "tower";
+    const sprinting = !daily && modeRef.current === "sprint";
+    Object.assign(
+      G,
+      freshState(
+        daily
+          ? DAILY_DIFFICULTY
+          : climbing
+            ? TOWER.difficulty
+            : sprinting
+              ? SPRINT.difficulty
+              : DIFFICULTIES[difficultyRef.current],
+      ),
+    );
     G.careerSaved = false;
+    if (sprinting) {
+      G.mode = "sprint";
+    } else if (climbing) {
+      G.mode = "tower";
+      G.lives = TOWER.lives;
+      G.round = towerRef.current.checkpoint + 1; // start at the last checkpoint
+      G.startFloor = G.round;
+      updateTower({ ...towerRef.current, climbs: towerRef.current.climbs + 1 });
+    } else if (!daily && towerRef.current.cleared) {
+      G.phoenix = true; // the Tower reward (not in the Daily, so everyone plays it the same)
+    }
     G.pack = daily ? null : PACK_BY_ID[packRef.current].words; // the Daily always uses the standard words
     if (daily) {
       const today = todayKey();
@@ -597,22 +739,24 @@ export default function Game() {
 
   const startRound = () => {
     G.phase = "banner";
-    G.limit = timeForRound(G.round, G.d);
+    G.limit = inSprint() ? SPRINT.seconds : timeForRound(tier(), G.d);
+    if (inSprint()) G.wordLimit = SPRINT.seconds;
     G.wordInRound = 0;
     G.roundMisses = 0;
     G.word = "";
     fuse.stopAnimation();
     fuse.setValue(1);
     popOverlay();
-    if (G.round > 1) play("round");
+    if (G.round > G.startFloor) play("round");
+    if (inTower() && G.round > towerRef.current.best) updateTower({ ...towerRef.current, best: G.round });
     checkAchievements(); // reaching a round (and the Daily ones on the first)
     playMusic("main"); // keeps going if it's already on; restarts after a boss
     bump();
-    later(nextWord, 1700);
+    later(nextWord, inTower() && !isCheckpointFloor(G.round) ? TOWER.bannerMs : 1700);
   };
 
   const nextWord = () => {
-    const range = G.d.lengths(G.round);
+    const range = inSprint() ? SPRINT.lengths : G.d.lengths(tier());
     G.word = pickWord(
       G.inBoss ? bossRange(range) : range,
       G.recent,
@@ -628,6 +772,19 @@ export default function Game() {
     G.wrongAt = null;
     G.look = "normal";
     G.wordId++;
+    G.wordShownAt = Date.now();
+    if (inSprint()) {
+      // One clock for the whole Sprint, started by the first word.
+      G.phase = "playing";
+      resetInput();
+      if (!G.clockStarted) {
+        G.clockStarted = true;
+        G.wordStart = Date.now();
+        runClock(1);
+      }
+      bump();
+      return;
+    }
     G.wordStart = Date.now();
     G.frozen = false;
     if (G.slowWords > 0) {
@@ -641,24 +798,31 @@ export default function Game() {
   };
 
   const advance = () => {
-    if (G.lives <= 0) return gameOver();
+    if (G.phase === "over") return;
+    if (inSprint()) return nextWord();
+    if (G.lives <= 0 && !tryPhoenix()) return gameOver();
     if (G.inBoss) {
       if (G.bossHp <= 0) bossDefeated();
       else nextWord(); // a timeout or Skip doesn't hurt the boss: just a new word
       return;
     }
     G.wordInRound++;
-    if (G.wordInRound >= wordsInRound(G.round)) startBoss();
-    else nextWord();
+    if (G.wordInRound < roundWords()) return nextWord();
+    // Survival: every round ends with a boss. Tower: only checkpoint floors have a guardian.
+    if (!inTower() || isCheckpointFloor(G.round)) startBoss();
+    else nextRound();
   };
 
   /* ---------- boss fights ---------- */
+  const roundWords = () => (inTower() ? TOWER.wordsPerFloor : wordsInRound(G.round));
+
   const startBoss = () => {
+    const finalBoss = inTower() && G.round === TOWER.floors;
     G.inBoss = true;
-    G.bossMaxHp = bossHp(G.round);
+    G.bossMaxHp = finalBoss ? TOWER.finalBossHp : bossHp(tier());
     G.bossHp = G.bossMaxHp;
     G.bossMisses = 0;
-    G.bossName = pickBossName(G.bossHistory, rng.current.bosses);
+    G.bossName = finalBoss ? TOWER.finalBossName : pickBossName(G.bossHistory, rng.current.bosses);
     G.bossHistory.push(G.bossName);
     G.phase = "banner";
     G.word = "";
@@ -674,6 +838,14 @@ export default function Game() {
 
   const nextRound = () => {
     if (G.roundMisses === 0) G.perfectRounds++;
+    if (inTower()) {
+      G.floorCleared = G.round;
+      if (G.round >= TOWER.floors) return towerComplete();
+      if (isCheckpointFloor(G.round)) {
+        updateTower({ ...towerRef.current, checkpoint: G.round });
+        later(() => addFloat(`Checkpoint saved · floor ${G.round}`, "reward"), 150);
+      }
+    }
     G.round++;
     startRound();
   };
@@ -683,7 +855,7 @@ export default function Game() {
     G.bossesDefeated++;
     if (G.bossMisses === 0) G.flawlessBosses++;
     if (G.lives === 1 && G.d.lives > 1) G.clutchBosses++;
-    const pts = BOSS.bonusPointsPerRound * G.round;
+    const pts = BOSS.bonusPointsPerRound * tier();
     G.score += pts;
     addFloat(`${G.bossName} defeated! +${pts}`, "reward");
     playVictory(); // stops the boss music and plays the fanfare
@@ -746,6 +918,11 @@ export default function Game() {
       letterPop.setValue(1.35);
       Animated.spring(letterPop, { toValue: 1, friction: 4, useNativeDriver: true }).start();
       play("miss");
+      if (inSprint()) {
+        sprintPenalty();
+        bump();
+        return;
+      }
       if (G.shields > 0) {
         G.shields--;
         G.shieldBlocks++;
@@ -757,7 +934,7 @@ export default function Game() {
       }
       addFloat(G.lives === 1 ? "Miss" : "−1 life", "bad", G.pos);
       loseLife(1);
-      if (G.lives <= 0) {
+      if (G.lives <= 0 && !tryPhoenix()) {
         G.phase = "between";
         fuse.stopAnimation();
         later(gameOver, 600);
@@ -768,9 +945,12 @@ export default function Game() {
 
   /** `auto`: finished by Auto-Type, so it doesn't count as a fast word. */
   const solved = (auto = false) => {
-    const used = (Date.now() - G.wordStart) / 1000;
+    const used = (Date.now() - (inSprint() ? G.wordShownAt : G.wordStart)) / 1000;
     G.typingSeconds += Math.min(used, G.wordLimit);
-    let pts = scoreWord(G.round, used, G.wordLimit, G.wordMisses);
+    G.lettersTyped += G.word.length;
+    let pts = inSprint()
+      ? scoreWord(SPRINT.pointsTier, used, SPRINT.wordPar, G.wordMisses)
+      : scoreWord(tier(), used, G.wordLimit, G.wordMisses);
     let mult = 1;
     if (G.doubleWords > 0) {
       mult *= 2;
@@ -803,16 +983,16 @@ export default function Game() {
     }
     G.phase = "between";
     G.look = "solved";
-    fuse.stopAnimation();
+    if (!inSprint()) fuse.stopAnimation(); // the Sprint clock keeps running
     const hit = G.inBoss ? (G.bossHp > 0 ? " · hit!" : " · final blow!") : "";
     const tags = [mult > 1 ? `${mult}×` : "", combo > 1 ? `combo ×${combo}` : ""].filter(Boolean).join(", ");
     addFloat(`+${pts}${tags ? ` (${tags})` : ""}${G.wordMisses === 0 && !hit && !tags ? " flawless" : ""}${hit}`, "good");
     play("word");
     buzz.impact(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    checkRewards();
+    if (!inSprint()) checkRewards(); // no power-ups in a Sprint
     checkAchievements();
     bump();
-    later(advance, 260);
+    later(advance, inSprint() ? 140 : 260);
   };
 
   const timedOut = () => {
@@ -841,8 +1021,11 @@ export default function Game() {
     if (G.phase === "over") return;
     G.phase = "over";
     fuse.stopAnimation();
-    playMusic(null);
-    play("over");
+    if (G.towerTop) playVictory();
+    else {
+      playMusic(null);
+      play("over");
+    }
     setIsNewBest(recordBest() && G.score > 0);
     recordDaily();
     checkAchievements(); // end-of-game ones, like Sharpshooter
@@ -855,6 +1038,19 @@ export default function Game() {
 
   /** Saves the score as this difficulty's best if it beats it. Returns whether it did. */
   const recordBest = () => {
+    if (inTower()) return false; // Tower scores aren't Survival bests
+    if (inSprint()) {
+      const b = sprintBestRef.current;
+      const words = G.wordsTyped;
+      const speed = wpm(G.lettersTyped, sprintSeconds());
+      const next = { score: Math.max(b.score, G.score), words: Math.max(b.words, words), wpm: Math.max(b.wpm, speed) };
+      if (next.score !== b.score || next.words !== b.words || next.wpm !== b.wpm) {
+        sprintBestRef.current = next;
+        setSprintBest(next);
+        saveSprint(next);
+      }
+      return G.score > b.score;
+    }
     const id = G.d.id;
     if (G.score <= bestRef.current[id]) return false;
     bestRef.current = { ...bestRef.current, [id]: G.score };
@@ -907,6 +1103,7 @@ export default function Game() {
       G.pausedRemaining = v;
     });
     G.phase = "paused";
+    G.pausedAt = Date.now();
     setConfirmQuit(false);
     pauseMusic();
     popOverlay();
@@ -918,6 +1115,7 @@ export default function Game() {
     const elapsedFrac = 1 - G.pausedRemaining;
     G.wordStart = Date.now() - elapsedFrac * G.wordLimit * 1000;
     G.frozen = false; // pausing uses up what was left of a Freeze
+    G.wordShownAt += Date.now() - G.pausedAt; // don't count the pause against this word's time
     G.phase = "playing";
     resumeMusic();
     focusInput();
@@ -942,6 +1140,14 @@ export default function Game() {
     }
     if (G.bucketFilled) checkAchievements();
   };
+
+  /** Sprint: seconds of the minute used so far. */
+  const sprintSeconds = () => {
+    if (!G.clockStarted) return 0;
+    if (G.phase === "over") return SPRINT.seconds - remainingAtEnd();
+    return Math.min(SPRINT.seconds, SPRINT.seconds - remainingSeconds());
+  };
+  const remainingAtEnd = () => (G.phase === "paused" ? G.pausedRemaining * G.wordLimit : 0);
 
   /** Seconds left on the current word's clock. */
   const remainingSeconds = () =>
@@ -996,9 +1202,9 @@ export default function Game() {
   const applyBonus = (id: BonusId): string | null => {
     switch (id) {
       case "megaLife": {
-        if (G.lives >= MAX_LIVES) return "Lives are full";
+        if (G.lives >= maxLives()) return "Lives are full";
         const before = G.lives;
-        G.lives = Math.min(MAX_LIVES, G.lives + BONUS.megaLives);
+        G.lives = Math.min(maxLives(), G.lives + BONUS.megaLives);
         for (let i = before; i < G.lives; i++) {
           pips[i].setValue(1.8);
           Animated.spring(pips[i], { toValue: 1, friction: 4, useNativeDriver: true }).start();
@@ -1047,7 +1253,7 @@ export default function Game() {
   const applyPowerUp = (id: PowerUpId): string | null => {
     switch (id) {
       case "life": {
-        if (G.lives >= MAX_LIVES) return "Lives are full";
+        if (G.lives >= maxLives()) return "Lives are full";
         G.lives++;
         const p = pips[G.lives - 1];
         p.setValue(1.8);
@@ -1140,6 +1346,8 @@ export default function Game() {
       setBest(bestRef.current);
       lifetimeRef.current = EMPTY_LIFETIME;
       setLifetime(EMPTY_LIFETIME);
+      towerRef.current = EMPTY_TOWER;
+      setTower(EMPTY_TOWER);
       resetStats();
     } else if (confirmReset === "achievements") {
       unlockedRef.current = {};
@@ -1185,17 +1393,27 @@ export default function Game() {
   };
 
   /* ---------- render ---------- */
-  const total = wordsInRound(G.round);
-  const oneLife = G.d.lives === 1;
+  const climbing = G.mode === "tower";
+  const sprinting = G.mode === "sprint";
+  const liveWpm = sprinting ? wpm(G.lettersTyped, sprintSeconds()) : 0;
+  const total = climbing ? TOWER.wordsPerFloor : wordsInRound(G.round);
+  const startLives = climbing ? TOWER.lives : G.d.lives;
+  const oneLife = startLives === 1;
   const showNoLives = oneLife && G.lives <= 1; // Impossible, unless an Extra Life was used
-  const low = !oneLife && G.lives > 0 && G.lives <= Math.ceil(G.d.lives * 0.3);
+  const low = !oneLife && G.lives > 0 && G.lives <= Math.ceil(startLives * 0.3);
   const bestHere = best[G.d.id];
   const fontSize = currentFontSize();
   const hotOpacity = fuse.interpolate({ inputRange: [0, 0.3, 0.31, 1], outputRange: [1, 1, 0, 0] });
   const accuracy = G.keys ? `${Math.round((G.goodKeys / G.keys) * 100)}%` : "–";
   const prevLimit = G.round > 1 ? timeForRound(G.round - 1, G.d) : G.limit;
   let bannerNote = "";
-  if (G.round > 1) {
+  if (climbing) {
+    bannerNote = isCheckpointFloor(G.round)
+      ? G.round === TOWER.floors
+        ? "The final floor · a guardian waits at the top"
+        : "Checkpoint floor · beat the guardian to save"
+      : `Next checkpoint: floor ${nextCheckpoint(G.round)}`;
+  } else if (G.round > 1) {
     bannerNote = G.limit < prevLimit ? `Clock −${formatSeconds(prevLimit - G.limit)}` : "Clock at its fastest";
     if (wordsInRound(G.round) > wordsInRound(G.round - 1)) bannerNote += " · Longer round";
   }
@@ -1212,24 +1430,32 @@ export default function Game() {
           <Text style={s.meta}>
             {G.daily
               ? `Daily · ${prettyDate(G.dailyDate)}`
-              : `${G.d.label} · Best ${Math.max(bestHere, G.score).toLocaleString()}`}
+              : climbing
+                ? `Tower · checkpoint ${tower.checkpoint || "–"}`
+                : sprinting
+                  ? `Sprint · Best ${Math.max(sprintBest.score, G.score).toLocaleString()}`
+                  : `${G.d.label} · Best ${Math.max(bestHere, G.score).toLocaleString()}`}
           </Text>
         </View>
         <ComboBadge c={c} streak={G.streak} pop={comboPop} />
         <View style={[s.stat, { alignItems: "flex-end" }]}>
-          <Text style={s.label}>ROUND</Text>
-          <Text style={s.value}>{G.round}</Text>
+          <Text style={s.label}>{climbing ? "FLOOR" : sprinting ? "WORDS" : "ROUND"}</Text>
+          <Text style={s.value}>{sprinting ? G.wordsTyped : G.round}</Text>
           <Text style={s.meta}>
-            {G.inBoss ? `boss · ${G.bossHp} of ${G.bossMaxHp} HP` : `word ${Math.min(G.wordInRound + 1, total)} of ${total}`}
+            {sprinting ? `${liveWpm} wpm` : G.inBoss ? `boss · ${G.bossHp} of ${G.bossMaxHp} HP` : `word ${Math.min(G.wordInRound + 1, total)} of ${total}`}
           </Text>
         </View>
       </View>
       <View style={s.livesRow}>
         <Text style={[s.label, (low || showNoLives) && { color: c.miss }]}>
-          {showNoLives ? "NO LIVES · ONE MISS ENDS IT" : `LIVES ${G.lives}`}
+          {sprinting
+            ? `NO LIVES · A MISS COSTS ${SPRINT.missPenalty} SECOND`
+            : showNoLives
+              ? "NO LIVES · ONE MISS ENDS IT"
+              : `LIVES ${G.lives}`}
         </Text>
-        <View style={[s.pips, showNoLives && { display: "none" }]}>
-          {pips.slice(0, Math.max(G.d.lives, G.lives)).map((p, i) => {
+        <View style={[s.pips, (showNoLives || sprinting) && { display: "none" }]}>
+          {pips.slice(0, Math.max(startLives, G.lives)).map((p, i) => {
             const lost = i >= G.lives;
             return (
               <Animated.View
@@ -1335,7 +1561,9 @@ export default function Game() {
           </View>
           <View style={s.fuseRow}>
             <Text style={s.meta}>
-              Time per word <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{formatSeconds(G.phase === "banner" || G.phase === "title" ? G.limit : G.wordLimit)}
+              {sprinting ? "Sprint clock " : "Time per word "}
+              <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>
+                {formatSeconds(G.phase === "banner" || G.phase === "title" ? G.limit : G.wordLimit)}
               </Text>
             </Text>
             <Remaining G={G} style={s.meta} />
@@ -1343,7 +1571,9 @@ export default function Game() {
         </View>
 
         <Text style={s.hint}>
-          {G.phase === "playing" && G.round === 1 && G.wordInRound === 0
+          {G.phase === "playing" && sprinting && G.wordsTyped === 0
+            ? `As many words as you can. Wrong letters cost ${SPRINT.missPenalty} second.`
+            : G.phase === "playing" && G.round === 1 && G.wordInRound === 0
             ? oneLife
               ? "Type the word. One wrong letter ends the game."
               : "Type the word. Wrong letters cost a life."
@@ -1353,7 +1583,7 @@ export default function Game() {
         </Text>
       </Pressable>
 
-      <PowerUpTray c={c} G={G} onUse={activatePowerUp} onUseBonus={activateBonus} />
+      {!sprinting && <PowerUpTray c={c} G={G} onUse={activatePowerUp} onUseBonus={activateBonus} />}
 
       <View style={s.controls}>
         <Pressable style={s.chip} onPress={() => (G.phase === "paused" ? resume() : pause())} hitSlop={8}>
@@ -1430,20 +1660,67 @@ export default function Game() {
             streak={dailyStreak}
             onPlay={() => startGame(true)}
           />
-          <Text style={s.label}>OR PICK A DIFFICULTY</Text>
-          <View style={s.diffGrid} accessibilityRole="radiogroup">
-            {DIFFICULTY_ORDER.map(id => (
-              <DifficultyCard
-                key={id}
+          <Text style={s.label}>OR PICK A MODE</Text>
+          <Pressable
+            onPress={() => setShowModes(true)}
+            style={({ pressed }) => [s.modeButton, pressed && { transform: [{ scale: 0.98 }] }]}
+            accessibilityRole="button"
+            accessibilityLabel={`Game mode: ${MODE_BY_ID[mode].name}. Change mode`}
+          >
+            <View style={{ flex: 1, gap: 2 }}>
+              <Text style={[s.diffLabel, { color: c.accent }]}>{MODE_BY_ID[mode].name}</Text>
+              <Text style={s.diffWords}>{MODE_BY_ID[mode].tagline}</Text>
+            </View>
+            <View style={s.chip}>
+              <Text style={s.chipText}>CHANGE</Text>
+            </View>
+          </Pressable>
+          {mode === "sprint" ? (
+            <>
+              <View style={s.towerCard}>
+                <Text style={[s.label, { color: c.gold }]}>SPRINT · {SPRINT.seconds} SECONDS</Text>
+                <Text style={s.dailyTitle}>
+                  {sprintBest.score ? `Best ${sprintBest.score.toLocaleString()} points` : "No sprints yet"}
+                </Text>
+                <Text style={s.slotEffect}>
+                  {sprintBest.score ? `Most words ${sprintBest.words} · top speed ${sprintBest.wpm} wpm · ` : ""}No lives, no
+                  power-ups · a wrong letter costs {SPRINT.missPenalty} second
+                </Text>
+              </View>
+              <Btn c={c} label="Start sprint" onPress={() => startGame()} />
+            </>
+          ) : mode === "classic" ? (
+            <>
+              <Text style={s.label}>DIFFICULTY</Text>
+              <View style={s.diffGrid} accessibilityRole="radiogroup">
+                {DIFFICULTY_ORDER.map(id => (
+                  <DifficultyCard
+                    key={id}
+                    c={c}
+                    d={DIFFICULTIES[id]}
+                    best={best[id]}
+                    selected={difficulty === id}
+                    onPress={() => chooseDifficulty(id)}
+                  />
+                ))}
+              </View>
+              {tower.cleared && (
+                <Text style={[s.slotEffect, { color: c.gold }]}>
+                  Phoenix Feather ready: once per game, losing your last life brings you back with {PHOENIX.lives}.
+                </Text>
+              )}
+              <Btn c={c} label={`Start ${G.d.label}`} onPress={() => startGame()} />
+            </>
+          ) : (
+            <>
+              <TowerCard c={c} t={tower} />
+              <Btn
                 c={c}
-                d={DIFFICULTIES[id]}
-                best={best[id]}
-                selected={difficulty === id}
-                onPress={() => chooseDifficulty(id)}
+                label={tower.checkpoint ? `Climb from floor ${tower.checkpoint + 1}` : "Start climbing"}
+                onPress={() => startGame()}
               />
-            ))}
-          </View>
-          <Btn c={c} label={`Start ${G.d.label}`} onPress={() => startGame()} />
+            </>
+          )}
           <View style={s.btnGrid}>
             <View style={s.btnHalf}>
               <Btn c={c} label="How to play" onPress={() => setShowHelp(true)} secondary />
@@ -1480,9 +1757,49 @@ export default function Game() {
           {lifetime.games === 0 ? (
             <Text style={s.body}>Play a game and your totals and records will show up here.</Text>
           ) : (
-            <StatsBody c={c} life={lifetime} best={best} streak={dailyStreak} unlockedCount={Object.keys(unlocked).length} />
+            <StatsBody
+              c={c}
+              life={lifetime}
+              best={best}
+              streak={dailyStreak}
+              unlockedCount={Object.keys(unlocked).length}
+              sprint={sprintBest}
+              tower={tower}
+            />
           )}
           <Btn c={c} label="Done" onPress={() => setShowStats(false)} />
+        </Overlay>
+      )}
+
+      {G.phase === "title" && showModes && (
+        <Overlay c={c} pop={overlayPop}>
+          <View style={s.achHead}>
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text style={s.eyebrow}>GAME MODES</Text>
+              <Text style={s.h2}>Pick a mode</Text>
+            </View>
+            <Pressable style={s.chip} onPress={() => setShowModes(false)} hitSlop={10} accessibilityRole="button">
+              <Text style={s.chipText}>CLOSE</Text>
+            </Pressable>
+          </View>
+          <View style={{ gap: 10 }} accessibilityRole="radiogroup">
+            {MODES.map(m => (
+              <Pressable
+                key={m.id}
+                onPress={() => chooseMode(m.id)}
+                style={[s.modeCard, mode === m.id && { borderColor: c.accent, backgroundColor: c.accentSoft }]}
+                accessibilityRole="radio"
+                accessibilityState={{ selected: mode === m.id }}
+              >
+                <View style={s.bonusRow}>
+                  <Text style={[s.diffLabel, mode === m.id && { color: c.accent }]}>{m.name}</Text>
+                  {mode === m.id && <Text style={s.achDate}>SELECTED</Text>}
+                </View>
+                <Text style={[s.diffDetail, { fontVariant: undefined }]}>{m.tagline}</Text>
+                <Text style={s.diffWords}>{m.detail}</Text>
+              </Pressable>
+            ))}
+          </View>
         </Overlay>
       )}
 
@@ -1584,6 +1901,16 @@ export default function Game() {
             }
           />
           <Rule c={c} k="ROUNDS" v="Ten words a round. The clock gets shorter every round, and late rounds get longer." />
+          <Rule
+            c={c}
+            k="SPRINT"
+            v={`Sprint: ${SPRINT.seconds} seconds to type as many words as you can. No lives or power-ups; each wrong letter takes ${SPRINT.missPenalty} second off the clock.`}
+          />
+          <Rule
+            c={c}
+            k="TOWER"
+            v={`Tower Climb: ${TOWER.floors} floors of ${TOWER.wordsPerFloor} words on Medium rules with just ${TOWER.lives} lives. Every ${TOWER.checkpointEvery}th floor has a guardian; beat it to save a checkpoint. Reach the top to unlock the Phoenix Feather for Survival.`}
+          />
           <Rule
             c={c}
             k="COMBO"
@@ -1689,24 +2016,41 @@ export default function Game() {
         <View style={[StyleSheet.absoluteFill, s.bannerWrap]} pointerEvents="none">
           {G.inBoss ? (
             <Animated.View style={[s.banner, { transform: [{ scale: overlayPop }] }]}>
-              <Text style={[s.label, { color: c.miss, letterSpacing: 4 }]}>BOSS FIGHT</Text>
+              <Text style={[s.label, { color: c.miss, letterSpacing: 4 }]}>
+                {climbing ? (G.round === TOWER.floors ? "FINAL GUARDIAN" : "CHECKPOINT GUARDIAN") : "BOSS FIGHT"}
+              </Text>
               <Text style={s.bossName}>{G.bossName}</Text>
               <Text style={s.bannerSub}>
                 Type <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{G.bossMaxHp}</Text> words to
                 defeat it ·{" "}
                 <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{formatSeconds(G.limit)}</Text> per word
               </Text>
-              <Text style={[s.bannerNote, { color: c.gold }]}>Win a gold bonus power-up</Text>
+              <Text style={[s.bannerNote, { color: c.gold }]}>
+                {climbing
+                  ? G.round === TOWER.floors
+                    ? "Beat it to reach the top"
+                    : `Beat it to save floor ${G.round} as a checkpoint`
+                  : "Win a gold bonus power-up"}
+              </Text>
             </Animated.View>
           ) : (
           <Animated.View style={[s.banner, { transform: [{ scale: overlayPop }] }]}>
-            <Text style={s.label}>ROUND</Text>
-            <Text style={s.bannerBig}>{G.round}</Text>
+            <Text style={s.label}>{climbing ? `FLOOR · OF ${TOWER.floors}` : sprinting ? "SPRINT" : "ROUND"}</Text>
+            <Text style={s.bannerBig}>{sprinting ? SPRINT.seconds : G.round}</Text>
+            {sprinting ? (
+              <>
+                <Text style={s.bannerSub}>seconds · as many words as you can</Text>
+                <Text style={s.bannerNote}>A wrong letter costs {SPRINT.missPenalty} second</Text>
+              </>
+            ) : (
+            <>
             <Text style={s.bannerSub}>
               <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{total}</Text> words ·{" "}
               <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{formatSeconds(G.limit)}</Text> per word
             </Text>
             {bannerNote ? <Text style={s.bannerNote}>{bannerNote}</Text> : null}
+            </>
+            )}
           </Animated.View>
           )}
         </View>
@@ -1732,7 +2076,11 @@ export default function Game() {
           {confirmQuit ? (
             <>
               <Text style={[s.body, { color: c.ink }]}>
-                Quit this run? Your score of {G.score.toLocaleString()} still counts toward your best.
+                {sprinting
+                  ? "Quit this sprint? Your score still counts toward your Sprint best."
+                  : climbing
+                  ? `Quit this climb? You'll start from floor ${tower.checkpoint + 1} next time.`
+                  : `Quit this run? Your score of ${G.score.toLocaleString()} still counts toward your best.`}
               </Text>
               <Btn c={c} label="Yes, quit to main menu" onPress={quitToMenu} />
               <Btn c={c} label="Keep playing" onPress={resume} secondary />
@@ -1749,19 +2097,54 @@ export default function Game() {
 
       {G.phase === "over" && (
         <Overlay c={c} pop={overlayPop}>
-          <Text style={[s.eyebrow, { color: G.daily ? c.gold : c.miss }]}>
-            {G.daily ? `DAILY CHALLENGE · ${prettyDate(G.dailyDate).toUpperCase()}` : `${G.d.label.toUpperCase()} · `}
-            {G.daily ? "" : oneLife ? "GAME OVER" : "OUT OF LIVES"}
+          <Text style={[s.eyebrow, { color: G.daily || G.towerTop ? c.gold : c.miss }]}>
+            {G.daily
+              ? `DAILY CHALLENGE · ${prettyDate(G.dailyDate).toUpperCase()}`
+              : sprinting
+                ? "SPRINT · TIME'S UP"
+                : climbing
+                ? G.towerTop
+                  ? "TOWER CLIMB · SUMMIT REACHED"
+                  : "TOWER CLIMB · OUT OF LIVES"
+                : `${G.d.label.toUpperCase()} · ${oneLife ? "GAME OVER" : "OUT OF LIVES"}`}
           </Text>
-          <Text style={s.h2}>You reached round {G.round}</Text>
+          <Text style={s.h2}>
+            {sprinting
+              ? `${G.wordsTyped} word${G.wordsTyped === 1 ? "" : "s"} in ${SPRINT.seconds} seconds`
+              : climbing
+                ? G.towerTop
+                  ? "You reached the top!"
+                  : `You fell on floor ${G.round}`
+                : `You reached round ${G.round}`}
+          </Text>
           <View style={s.results}>
-            <Result
-              c={c}
-              k="SCORE"
-              v={G.score.toLocaleString()}
-              note={isNewBest ? `New ${G.d.label} best` : `${G.d.label} best ${bestHere.toLocaleString()}`}
-            />
-            <Result c={c} k="WORDS TYPED" v={String(G.wordsTyped)} />
+            {sprinting ? (
+              <Result
+                c={c}
+                k="SCORE"
+                v={G.score.toLocaleString()}
+                note={isNewBest ? "New Sprint best" : `Sprint best ${sprintBest.score.toLocaleString()}`}
+              />
+            ) : climbing ? (
+              <Result
+                c={c}
+                k="FLOORS CLIMBED"
+                v={String(Math.max(0, G.floorCleared - G.startFloor + 1))}
+                note={`From floor ${G.startFloor}`}
+              />
+            ) : (
+              <Result
+                c={c}
+                k="SCORE"
+                v={G.score.toLocaleString()}
+                note={isNewBest ? `New ${G.d.label} best` : `${G.d.label} best ${bestHere.toLocaleString()}`}
+              />
+            )}
+            {sprinting ? (
+              <Result c={c} k="SPEED" v={`${liveWpm} wpm`} note={`Best ${Math.max(sprintBest.wpm, liveWpm)} wpm`} />
+            ) : (
+              <Result c={c} k="WORDS TYPED" v={String(G.wordsTyped)} />
+            )}
             <Result c={c} k="ACCURACY" v={accuracy} />
             <Result c={c} k="FASTEST WORD" v={G.fastest ? `${G.fastest.t.toFixed(2)}s` : "–"} />
           </View>
@@ -1785,6 +2168,15 @@ export default function Game() {
               )}
             </View>
           )}
+          {climbing && (
+            <Text style={[s.body, { color: c.ink }]}>
+              {G.towerTop
+                ? `You unlocked the Phoenix Feather: once per Survival game, losing your last life brings you back with ${PHOENIX.lives}. The Tower resets for another climb.`
+                : tower.checkpoint
+                  ? `Your checkpoint is floor ${tower.checkpoint}, so your next climb starts on floor ${tower.checkpoint + 1}.`
+                  : `No checkpoint yet: beat the floor ${TOWER.checkpointEvery} guardian to save one.`}
+            </Text>
+          )}
           {G.daily ? (
             <>
               <Text style={[s.body, { color: c.ink }]}>
@@ -1796,7 +2188,19 @@ export default function Game() {
             </>
           ) : (
             <>
-              <Btn c={c} label="Play again" onPress={() => startGame()} />
+              <Btn
+                c={c}
+                label={
+                  sprinting
+                    ? "Sprint again"
+                    : climbing
+                      ? tower.checkpoint
+                        ? `Climb from floor ${tower.checkpoint + 1}`
+                        : "Climb again"
+                      : "Play again"
+                }
+                onPress={() => startGame()}
+              />
               <Btn c={c} label="Main menu" onPress={toTitle} secondary />
             </>
           )}
@@ -1831,6 +2235,35 @@ export default function Game() {
   );
 }
 
+/** Main menu, Tower Climb: progress up the tower, checkpoints marked. */
+function TowerCard({ c, t }: { c: Palette; t: TowerProgress }) {
+  const s = styles(c);
+  const marks = Array.from({ length: TOWER.floors / TOWER.checkpointEvery }, (_, i) => (i + 1) * TOWER.checkpointEvery);
+  return (
+    <View style={s.towerCard} accessibilityLabel={`Tower progress: checkpoint ${t.checkpoint}, best floor ${t.best}`}>
+      <Text style={[s.label, { color: c.gold }]}>{t.cleared ? "TOWER CLIMB · SUMMIT REACHED" : "TOWER CLIMB"}</Text>
+      <Text style={s.dailyTitle}>
+        {t.checkpoint ? `Checkpoint: floor ${t.checkpoint}` : "Start at floor 1"}
+      </Text>
+      <View style={s.towerTrack}>
+        <View style={[s.towerFill, { backgroundColor: c.ghost, width: `${t.best}%` }]} />
+        <View style={[s.towerFill, { backgroundColor: c.gold, width: `${t.checkpoint}%` }]} />
+        {marks.map(m => (
+          <View
+            key={m}
+            style={[s.towerMark, { left: `${m}%`, backgroundColor: m <= t.checkpoint ? c.gold : c.ghost }]}
+          />
+        ))}
+      </View>
+      <Text style={s.slotEffect}>
+        Best floor {t.best || "–"} · {t.climbs} climb{t.climbs === 1 ? "" : "s"} · Medium rules · {TOWER.lives} lives ·
+        checkpoint every {TOWER.checkpointEvery} floors
+        {t.cleared ? " · Phoenix Feather unlocked" : " · reach the top for the Phoenix Feather"}
+      </Text>
+    </View>
+  );
+}
+
 /** "45s", "12m", "3h 12m" */
 function formatDuration(seconds: number): string {
   const s = Math.round(seconds);
@@ -1847,12 +2280,16 @@ function StatsBody({
   best,
   streak,
   unlockedCount,
+  sprint,
+  tower,
 }: {
   c: Palette;
   life: LifetimeStats;
   best: BestScores;
   streak: DailyStreak;
   unlockedCount: number;
+  sprint: SprintBest;
+  tower: TowerProgress;
 }) {
   const s = styles(c);
   const n = (v: number) => v.toLocaleString();
@@ -1891,6 +2328,12 @@ function StatsBody({
           life.gamesByDifficulty[id] ? plural(life.gamesByDifficulty[id], "game") : undefined,
         ]),
       )}
+      {section("MODES", [
+        ["SPRINT BEST", sprint.score ? n(sprint.score) : "–", sprint.words ? `${sprint.words} words max` : undefined],
+        ["SPRINT SPEED", sprint.wpm ? `${sprint.wpm} wpm` : "–"],
+        ["TOWER BEST FLOOR", tower.best ? n(tower.best) : "–", tower.checkpoint ? `checkpoint ${tower.checkpoint}` : undefined],
+        ["TOWER SUMMIT", tower.cleared ? "Reached" : "Not yet"],
+      ])}
       {section("ACCURACY", [
         ["ACCURACY", accuracy],
         ["LETTERS TYPED", n(life.keys)],
@@ -2151,6 +2594,7 @@ function PowerUpTray({
   if (G.frozen) active.push({ text: "Frozen", color: c.ice });
   if (G.shields > 0) active.push({ text: G.shields > 1 ? `Shield ×${G.shields}` : "Shield on", color: c.violet });
   if (slowLeft > 0) active.push({ text: `Slow-Mo · ${slowLeft} word${slowLeft > 1 ? "s" : ""}`, color: c.good });
+  if (G.phoenix) active.push({ text: "Phoenix ready", color: c.gold });
   if (G.doubleWords > 0) active.push({ text: `2× points · ${G.doubleWords} word${G.doubleWords > 1 ? "s" : ""}`, color: c.gold });
   if (G.tripleWords > 0) active.push({ text: `3× points · ${G.tripleWords} word${G.tripleWords > 1 ? "s" : ""}`, color: c.gold });
 
@@ -2296,7 +2740,8 @@ function Remaining({ G, style }: { G: GameState; style: object }) {
   }, []);
   let remaining = G.limit;
   if (G.phase === "playing" && G.frozen) remaining = G.pausedRemaining * G.wordLimit;
-  else if (G.phase === "playing") remaining = Math.max(0, G.wordLimit - (Date.now() - G.wordStart) / 1000);
+  else if (G.phase === "playing" || (G.mode === "sprint" && G.phase === "between" && G.clockStarted))
+    remaining = Math.max(0, G.wordLimit - (Date.now() - G.wordStart) / 1000);
   else if (G.phase === "paused") remaining = G.pausedRemaining * G.wordLimit;
   else if (G.phase === "between" || G.phase === "over") remaining = 0;
   return <Text style={[style, { fontVariant: ["tabular-nums"] }]}>{remaining.toFixed(1)}s</Text>;
@@ -2544,6 +2989,23 @@ function make(c: Palette) {
 
     setGroup: { borderWidth: 1, borderColor: c.line, borderRadius: 12, paddingHorizontal: 12, marginTop: -6 },
     setRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 11 },
+    modeButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      borderWidth: 1.5,
+      borderColor: c.accent,
+      backgroundColor: c.accentSoft,
+      borderRadius: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      marginTop: -6,
+    },
+    modeCard: { borderWidth: 1.5, borderColor: c.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, gap: 2 },
+    towerCard: { borderWidth: 1.5, borderColor: c.line, borderRadius: 12, padding: 12, gap: 8 },
+    towerTrack: { height: 10, borderRadius: 999, backgroundColor: c.bg, overflow: "hidden", justifyContent: "center" },
+    towerFill: { position: "absolute", left: 0, top: 0, bottom: 0, borderRadius: 999 },
+    towerMark: { position: "absolute", width: 2, height: 10, marginLeft: -2 },
     btnGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 10 },
     btnHalf: { width: "48.5%" },
     themeSwatch: {

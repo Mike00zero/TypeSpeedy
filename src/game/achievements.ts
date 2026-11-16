@@ -3,9 +3,11 @@
  * Some are about a single game ("reach round 10"), some add up across every game ("type 500 words").
  */
 import { DIFFICULTY_ORDER, type DifficultyId } from "./config";
+import type { GameMode } from "./modes";
 
 /** What happened in the current game so far. */
 export type RunStats = {
+  mode: GameMode;
   difficulty: DifficultyId;
   daily: boolean;
   over: boolean; // the game has ended
@@ -28,6 +30,10 @@ export type RunStats = {
   fastestLong: number | null; // seconds, a 7-letter word
   keys: number;
   goodKeys: number;
+  // Tower Climb
+  startFloor: number;
+  floorCleared: number; // highest floor cleared this climb (0 = none)
+  towerTop: boolean; // cleared floor 100 this climb
 };
 
 /** Totals and records across every finished game (shown on the Stats screen). */
@@ -72,6 +78,7 @@ export const EMPTY_LIFETIME: LifetimeStats = {
 
 export function emptyRun(difficulty: DifficultyId = "medium"): RunStats {
   return {
+    mode: "classic",
     difficulty,
     daily: false,
     over: false,
@@ -94,6 +101,9 @@ export function emptyRun(difficulty: DifficultyId = "medium"): RunStats {
     fastestLong: null,
     keys: 0,
     goodKeys: 0,
+    startFloor: 1,
+    floorCleared: 0,
+    towerTop: false,
   };
 }
 
@@ -116,7 +126,7 @@ export function addRun(life: LifetimeStats, run: RunStats | null): LifetimeStats
     keys: life.keys + run.keys,
     goodKeys: life.goodKeys + run.goodKeys,
     typingSeconds: life.typingSeconds + run.typingSeconds,
-    bestRound: Math.max(life.bestRound, run.round),
+    bestRound: run.mode === "classic" ? Math.max(life.bestRound, run.round) : life.bestRound, // floors aren't rounds
     bestStreak: Math.max(life.bestStreak, run.bestStreak),
     fastest: faster,
     perfectRounds: life.perfectRounds + run.perfectRounds,
@@ -132,7 +142,19 @@ export type AchievementContext = {
   dailyStreak: number;
 };
 
-export type AchievementGroup = "Getting started" | "Score" | "Rounds" | "Combos" | "Bosses" | "Speed" | "Power-ups" | "Difficulty" | "Daily" | "Career";
+export type AchievementGroup =
+  | "Getting started"
+  | "Score"
+  | "Rounds"
+  | "Combos"
+  | "Bosses"
+  | "Speed"
+  | "Power-ups"
+  | "Difficulty"
+  | "Tower"
+  | "Sprint"
+  | "Daily"
+  | "Career";
 
 export const ACHIEVEMENT_GROUPS: AchievementGroup[] = [
   "Getting started",
@@ -143,6 +165,8 @@ export const ACHIEVEMENT_GROUPS: AchievementGroup[] = [
   "Speed",
   "Power-ups",
   "Difficulty",
+  "Tower",
+  "Sprint",
   "Daily",
   "Career",
 ];
@@ -160,7 +184,11 @@ export type Achievement = {
 
 const goal = (cur: number, target: number): [number, number] => [Math.min(cur, target), target];
 const yes = (ok: boolean): [number, number] => [ok ? 1 : 0, 1];
-const reachedRound = (r: RunStats) => r.round; // being on round N means N-1 rounds were cleared
+// Being on round N means N-1 rounds were cleared. Survival only: Tower floors aren't rounds.
+const reachedRound = (r: RunStats) => (r.mode === "classic" ? r.round : 0);
+const survival = (r: RunStats) => r.mode === "classic";
+const sprint = (r: RunStats) => (r.mode === "sprint" ? r.wordsTyped : 0); // words finished in this Sprint
+const tower = (r: RunStats, floorsCleared: number) => r.mode === "tower" && r.floorCleared >= floorsCleared;
 
 export const ACHIEVEMENTS: Achievement[] = [
   // Getting started (the only easy ones)
@@ -180,8 +208,8 @@ export const ACHIEVEMENTS: Achievement[] = [
   { id: "round_30", name: "Marathon", desc: "Reach round 30.", group: "Rounds", progress: x => goal(reachedRound(x.run), 30) },
   { id: "round_40", name: "Ultramarathon", desc: "Reach round 40.", group: "Rounds", progress: x => goal(reachedRound(x.run), 40) },
   { id: "round_50", name: "Endless", desc: "Reach round 50.", group: "Rounds", progress: x => goal(reachedRound(x.run), 50) },
-  { id: "perfect_3", name: "Clean Sweep", desc: "Clear 3 perfect rounds (boss included, no wrong letters or timeouts) in one game.", group: "Rounds", progress: x => goal(x.run.perfectRounds, 3) },
-  { id: "perfect_10", name: "Spotless", desc: "Clear 10 perfect rounds in one game.", group: "Rounds", progress: x => goal(x.run.perfectRounds, 10) },
+  { id: "perfect_3", name: "Clean Sweep", desc: "Clear 3 perfect rounds (boss included, no wrong letters or timeouts) in one game.", group: "Rounds", progress: x => goal(survival(x.run) ? x.run.perfectRounds : 0, 3) },
+  { id: "perfect_10", name: "Spotless", desc: "Clear 10 perfect rounds in one game.", group: "Rounds", progress: x => goal(survival(x.run) ? x.run.perfectRounds : 0, 10) },
 
   // Combos (flawless words in a row)
   { id: "combo_25", name: "Hot Streak", desc: "Finish 25 words in a row with no wrong letters.", group: "Combos", progress: x => goal(x.run.bestStreak, 25) },
@@ -207,7 +235,7 @@ export const ACHIEVEMENTS: Achievement[] = [
   { id: "shield_5", name: "Saved!", desc: "Have Shields block 5 misses in one game.", group: "Power-ups", progress: x => goal(x.run.shieldBlocks, 5) },
   { id: "gold_5", name: "Gold Rush", desc: "Use 5 gold bonus power-ups in one game.", group: "Power-ups", progress: x => goal(x.run.bonusesUsed, 5) },
   { id: "toolbox_40", name: "Toolbox", desc: "Use 40 power-ups in one game.", group: "Power-ups", progress: x => goal(x.run.powerUpsUsed, 40) },
-  { id: "purist_15", name: "Purist", desc: "Reach round 15 without using a power-up.", group: "Power-ups", progress: x => yes(x.run.round >= 15 && x.run.powerUpsUsed === 0) },
+  { id: "purist_15", name: "Purist", desc: "Reach round 15 without using a power-up.", group: "Power-ups", progress: x => yes(survival(x.run) && x.run.round >= 15 && x.run.powerUpsUsed === 0) },
 
   // Difficulty
   { id: "hard_boss_5", name: "Hardened", desc: "Beat 5 bosses in one game on Hard.", group: "Difficulty", progress: x => yes(x.run.difficulty === "hard" && x.run.bossesDefeated >= 5) },
@@ -215,6 +243,19 @@ export const ACHIEVEMENTS: Achievement[] = [
   { id: "impossible_boss", name: "Not So Impossible", desc: "Beat a boss on Impossible.", group: "Difficulty", progress: x => yes(x.run.difficulty === "impossible" && x.run.bossesDefeated >= 1) },
   { id: "impossible_r8", name: "Truly Impossible", desc: "Reach round 8 on Impossible.", group: "Difficulty", progress: x => yes(x.run.difficulty === "impossible" && x.run.round >= 8) },
   { id: "all_difficulties", name: "Well Rounded", desc: "Beat a boss on every difficulty.", group: "Difficulty", progress: x => goal(x.life.bossDifficulties.length, DIFFICULTY_ORDER.length), showProgress: true },
+
+  // Tower Climb
+  { id: "tower_10", name: "Base Camp", desc: "Reach the first Tower checkpoint (clear floor 10).", group: "Tower", progress: x => yes(tower(x.run, 10)) },
+  { id: "tower_50", name: "Halfway Up", desc: "Clear floor 50 of the Tower.", group: "Tower", progress: x => yes(tower(x.run, 50)) },
+  { id: "tower_80", name: "Thin Air", desc: "Clear floor 80 of the Tower.", group: "Tower", progress: x => yes(tower(x.run, 80)) },
+  { id: "tower_top", name: "Summit", desc: "Reach the top of the Tower and unlock the Phoenix Feather.", group: "Tower", progress: x => yes(x.run.towerTop) },
+  { id: "tower_free_solo", name: "Free Solo", desc: "Climb all 100 floors in one go, starting from floor 1.", group: "Tower", progress: x => yes(x.run.towerTop && x.run.startFloor === 1) },
+
+  // Sprint (60 seconds)
+  { id: "sprint_20", name: "Off the Blocks", desc: "Finish 20 words in one Sprint.", group: "Sprint", progress: x => goal(sprint(x.run), 20) },
+  { id: "sprint_35", name: "Sprinter", desc: "Finish 35 words in one Sprint.", group: "Sprint", progress: x => goal(sprint(x.run), 35) },
+  { id: "sprint_50", name: "Photo Finish", desc: "Finish 50 words in one Sprint.", group: "Sprint", progress: x => goal(sprint(x.run), 50) },
+  { id: "sprint_clean", name: "Clean Run", desc: "Finish 25 words in a Sprint without a single wrong letter.", group: "Sprint", progress: x => yes(sprint(x.run) >= 25 && x.run.keys === x.run.goodKeys) },
 
   // Daily Challenge
   { id: "daily_first", name: "Daily Player", desc: "Play a Daily Challenge.", group: "Daily", progress: x => yes(x.run.daily || x.dailyStreak >= 1) },

@@ -3,6 +3,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { EMPTY_LIFETIME, pruneUnlocked, type LifetimeStats, type Unlocked } from "./achievements";
 import { DIFFICULTY_ORDER, type DifficultyId } from "./config";
 import { PACK_BY_ID, THEME_BY_ID, type PackId, type ThemeId } from "./unlocks";
+import { EMPTY_TOWER, type TowerProgress } from "./tower";
+import { EMPTY_SPRINT, MODE_BY_ID, type GameMode, type SprintBest } from "./modes";
 
 const BEST = "typespeedy.best"; // per difficulty: typespeedy.best.easy, ...
 const LEGACY_BEST = "typespeedy.best"; // before difficulties existed (counts as medium)
@@ -13,6 +15,9 @@ const THEME = "typespeedy.theme";
 const PACK = "typespeedy.pack";
 const HAPTICS = "typespeedy.haptics";
 const EFFECTS = "typespeedy.effects"; // screen shake and red flash on a miss
+const MODE = "typespeedy.mode";
+const TOWER_KEY = "typespeedy.tower";
+const SPRINT_KEY = "typespeedy.sprint";
 
 export type BestScores = Record<DifficultyId, number>;
 
@@ -25,12 +30,13 @@ type Prefs = {
   pack: PackId;
   haptics: boolean;
   effects: boolean;
+  mode: GameMode;
 };
 
 export async function loadPrefs(): Promise<Prefs> {
   const best: BestScores = { easy: 0, medium: 0, hard: 0, impossible: 0 };
   try {
-    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, MUSIC, DIFFICULTY, THEME, PACK, HAPTICS, EFFECTS];
+    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, MUSIC, DIFFICULTY, THEME, PACK, HAPTICS, EFFECTS, MODE];
     const pairs = await AsyncStorage.multiGet(keys);
     const get = (k: string) => pairs.find(([key]) => key === k)?.[1] ?? null;
     for (const d of DIFFICULTY_ORDER) best[d] = Number(get(`${BEST}.${d}`)) || 0;
@@ -47,10 +53,41 @@ export async function loadPrefs(): Promise<Prefs> {
       pack: pack && PACK_BY_ID[pack] ? pack : "classic",
       haptics: get(HAPTICS) !== "0", // on unless turned off
       effects: get(EFFECTS) !== "0",
+      mode: MODE_BY_ID[get(MODE) as GameMode] ? (get(MODE) as GameMode) : "classic",
     };
   } catch {
-    return { best, muted: false, music: true, difficulty: "medium", theme: "classic", pack: "classic", haptics: true, effects: true };
+    return { best, muted: false, music: true, difficulty: "medium", theme: "classic", pack: "classic", haptics: true, effects: true, mode: "classic" };
   }
+}
+
+export function saveMode(mode: GameMode) {
+  AsyncStorage.setItem(MODE, mode).catch(() => {});
+}
+
+export async function loadTower(): Promise<TowerProgress> {
+  try {
+    const t = await AsyncStorage.getItem(TOWER_KEY);
+    return t ? { ...EMPTY_TOWER, ...(JSON.parse(t) as Partial<TowerProgress>) } : EMPTY_TOWER;
+  } catch {
+    return EMPTY_TOWER;
+  }
+}
+
+export async function loadSprint(): Promise<SprintBest> {
+  try {
+    const t = await AsyncStorage.getItem(SPRINT_KEY);
+    return t ? { ...EMPTY_SPRINT, ...(JSON.parse(t) as Partial<SprintBest>) } : EMPTY_SPRINT;
+  } catch {
+    return EMPTY_SPRINT;
+  }
+}
+
+export function saveSprint(b: SprintBest) {
+  AsyncStorage.setItem(SPRINT_KEY, JSON.stringify(b)).catch(() => {});
+}
+
+export function saveTower(t: TowerProgress) {
+  AsyncStorage.setItem(TOWER_KEY, JSON.stringify(t)).catch(() => {});
 }
 
 export function saveHaptics(on: boolean) {
@@ -61,9 +98,9 @@ export function saveEffects(on: boolean) {
   AsyncStorage.setItem(EFFECTS, on ? "1" : "0").catch(() => {});
 }
 
-/** Settings > Reset stats: best scores and lifetime totals. Today's Daily try stays used. */
+/** Settings > Reset stats: best scores, lifetime totals and Tower progress. Today's Daily try stays used. */
 export function resetStats() {
-  AsyncStorage.multiRemove([...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, LIFETIME_KEY]).catch(() => {});
+  AsyncStorage.multiRemove([...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, LIFETIME_KEY, TOWER_KEY, SPRINT_KEY]).catch(() => {});
 }
 
 /** Settings > Reset achievements (themes and word packs they unlocked go back to Classic). */
