@@ -5,6 +5,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { EMPTY_LIFETIME, pruneUnlocked, type LifetimeStats, type Unlocked } from "./achievements";
 import { DIFFICULTY_ORDER, type DifficultyId } from "./config";
+import type { Look } from "./theme";
 import { PACK_BY_ID, THEME_BY_ID, type PackId, type ThemeId } from "./unlocks";
 import { EMPTY_TOWER, type TowerProgress } from "./tower";
 import { EMPTY_TRIALS, type ProTrials } from "./pro";
@@ -33,6 +34,7 @@ const PACK = "typespeedy.pack";
 const HAPTICS = "typespeedy.haptics";
 const EFFECTS = "typespeedy.effects"; // screen shake and red flash on a miss
 const MODE = "typespeedy.mode";
+const LOOK = "typespeedy.look";
 const TOWER_KEY = "typespeedy.tower";
 const SPRINT_KEY = "typespeedy.sprint";
 const ZEN_KEY = "typespeedy.zen";
@@ -56,12 +58,13 @@ type Prefs = {
   haptics: boolean;
   effects: boolean;
   mode: GameMode;
+  look: Look;
 };
 
 export async function loadPrefs(): Promise<Prefs> {
   const best: BestScores = { easy: 0, medium: 0, hard: 0, impossible: 0 };
   try {
-    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, MUSIC, DIFFICULTY, THEME, PACK, HAPTICS, EFFECTS, MODE];
+    const keys = [...DIFFICULTY_ORDER.map(d => `${BEST}.${d}`), LEGACY_BEST, MUTED, MUSIC, DIFFICULTY, THEME, PACK, HAPTICS, EFFECTS, MODE, LOOK];
     const pairs = await AsyncStorage.multiGet(keys);
     const get = (k: string) => pairs.find(([key]) => key === k)?.[1] ?? null;
     for (const d of DIFFICULTY_ORDER) best[d] = Number(get(`${BEST}.${d}`)) || 0;
@@ -79,10 +82,15 @@ export async function loadPrefs(): Promise<Prefs> {
       haptics: get(HAPTICS) !== "0", // on unless turned off
       effects: get(EFFECTS) !== "0",
       mode: MODE_BY_ID[get(MODE) as GameMode] ? (get(MODE) as GameMode) : "classic",
+      look: get(LOOK) === "modern" ? "modern" : "court",
     };
   } catch {
-    return { best, muted: false, music: true, difficulty: "medium", theme: "classic", pack: "classic", haptics: true, effects: true, mode: "classic" };
+    return { best, muted: false, music: true, difficulty: "medium", theme: "classic", pack: "classic", haptics: true, effects: true, mode: "classic", look: "court" };
   }
+}
+
+export function saveLook(look: Look) {
+  AsyncStorage.setItem(LOOK, look).catch(() => {});
 }
 
 export function saveMode(mode: GameMode) {

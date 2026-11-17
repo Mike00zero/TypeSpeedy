@@ -77,9 +77,61 @@ export const bossPalette: Palette = {
   violet: "#C9A8FF",
 };
 
+/**
+ * "Royal Court": the game's default look since the redesign. Dark stone, gold trim, parchment
+ * text and carved serif titles. (Shapes and fonts for it live in Game.tsx's styles; see `getLook`.)
+ */
+const court: Palette = {
+  bg: "#120C10",
+  surface: "#1E1418",
+  ink: "#F3E6CF",
+  muted: "#B8A58A",
+  ghost: "#5C4A44",
+  line: "#3A2A22",
+  accent: "#E8C068",
+  accentSoft: "rgba(232, 192, 104, 0.12)",
+  onAccent: "#1A1008",
+  good: "#7FD39A",
+  miss: "#FF5A6E",
+  missSoft: "rgba(255, 90, 110, 0.18)",
+  scrim: "rgba(18, 12, 16, 0.93)",
+  gold: "#E8C068",
+  ice: "#5CC8EC",
+  violet: "#C9A8FF",
+};
+
+/**
+ * The overall look. "court" (default) restyles every screen: serif titles, gold trim, squarer
+ * corners, shield-shaped lives. "modern" is the original clean design (Settings > Look).
+ */
+export type Look = "court" | "modern";
+let look: Look = "court";
+export function setLook(l: Look) {
+  look = l;
+}
+export function getLook(): Look {
+  return look;
+}
+
+/** "#E8C068" + 0.45 -> "#E8C06873" (other color formats come back unchanged). */
+export function withAlpha(color: string, alpha: number): string {
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) return color;
+  return color + Math.round(alpha * 255).toString(16).padStart(2, "0");
+}
+
 /** The Classic theme's two looks (it follows the phone's light or dark mode). */
 export const lightPalette = light;
+export const courtPalette = court;
 export const darkPalette = dark;
+
+/** Fonts for the Royal Court look: Cinzel for titles and labels, the same word and body fonts. */
+export const courtFonts = {
+  display: "Cinzel_800ExtraBold",
+  displayMedium: "Cinzel_600SemiBold",
+  word: "IBMPlexMono_600SemiBold",
+  body: "Inter_400Regular",
+  bodyStrong: "Inter_600SemiBold",
+};
 
 export const fonts = {
   display: "BricolageGrotesque_800ExtraBold",

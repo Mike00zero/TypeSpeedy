@@ -1,18 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="-138 -141 1300 1300" width="1024" height="1024"><defs>
-  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1B2140"/><stop offset="0.55" stop-color="#140A1C"/><stop offset="1" stop-color="#2E0A16"/></linearGradient>
-  <radialGradient id="glow" cx="0.5" cy="0.56" r="0.46"><stop offset="0" stop-color="#FF3355" stop-opacity="0.42"/><stop offset="0.6" stop-color="#FF3355" stop-opacity="0.12"/><stop offset="1" stop-color="#FF3355" stop-opacity="0"/></radialGradient>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1B1016"/><stop offset="1" stop-color="#2E0A16"/></linearGradient>
+  <radialGradient id="glow" cx="0.5" cy="0.58" r="0.45"><stop offset="0" stop-color="#FF3355" stop-opacity="0.38"/><stop offset="1" stop-color="#FF3355" stop-opacity="0"/></radialGradient>
   <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE59A"/><stop offset="1" stop-color="#E3A21E"/></linearGradient>
-  <linearGradient id="red" gradientUnits="userSpaceOnUse" x1="0" y1="414" x2="0" y2="798"><stop offset="0" stop-color="#FF6B7D"/><stop offset="1" stop-color="#E01E3C"/></linearGradient>
-</defs><g>  <!-- crown --><g transform="rotate(-8 512 300) translate(14,4)">
+  <linearGradient id="red" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FF5A6E"/><stop offset="1" stop-color="#C8243B"/></linearGradient>
+</defs><g transform="rotate(-8 512 300) translate(14,-34)">
   <path d="M332 336 L318 186 L428 268 L512 150 L596 268 L706 186 L692 336 Z" fill="url(#gold)"/>
   <rect x="318" y="318" width="388" height="62" rx="16" fill="url(#gold)"/>
   <circle cx="318" cy="186" r="28" fill="url(#gold)"/>
   <circle cx="512" cy="150" r="30" fill="url(#gold)"/>
   <circle cx="706" cy="186" r="28" fill="url(#gold)"/>
   <circle cx="512" cy="349" r="17" fill="#FF3355"/>
-  <circle cx="420" cy="349" r="11" fill="#FFF3D1" opacity="0.9"/>
-  <circle cx="604" cy="349" r="11" fill="#FFF3D1" opacity="0.9"/>
-  </g><!-- the red "missed" T -->
-  <path d="M270 414 H754 Q778 414 778 438 V514 Q778 538 754 538 H574 V774 Q574 798 550 798 H474 Q450 798 450 774 V538 H270 Q246 538 246 514 V438 Q246 414 270 414 Z" fill="url(#red)"/>
-  <!-- the miss underline -->
-  <rect x="352" y="846" width="320" height="42" rx="21" fill="#FF4A5C"/></g></svg>
+</g><path transform="translate(293.3 840) scale(0.6259)" d="M452 -697L452 0L247 0L247 -697L452 -697ZM689 -701L689 -651L10 -651L10 -701L689 -701ZM689 -654L689 -513L679 -514L679 -521Q679 -581 645 -615.5Q611 -650 550 -651L550 -654L689 -654ZM689 -719L689 -690L567 -701Q589 -701 613.5 -704Q638 -707 659 -711Q680 -715 689 -719ZM250 -73L250 0L170 0L170 -10Q170 -10 176.5 -10Q183 -10 183 -10Q209 -10 227.5 -28.5Q246 -47 247 -73L250 -73ZM449 -73L452 -73Q453 -47 471.5 -28.5Q490 -10 516 -10Q516 -10 522.5 -10Q529 -10 529 -10L529 0L449 0L449 -73ZM149 -654L149 -651Q88 -650 54 -615.5Q20 -581 20 -521L20 -514L10 -513L10 -654L149 -654ZM10 -719Q20 -715 40.5 -711Q61 -707 86 -704Q111 -701 132 -701L10 -690L10 -719Z" fill="url(#red)" stroke="#E8C068" stroke-width="16" stroke-linejoin="round" paint-order="stroke"/><rect x="372" y="878" width="280" height="30" rx="15" fill="#FF5A6E"/></svg>

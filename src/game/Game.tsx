@@ -76,7 +76,7 @@ import {
   type DifficultyId,
 } from "./config";
 import { pickWord } from "./words";
-import { bossPalette, fonts, usePalette, type Palette } from "./theme";
+import { bossPalette, courtFonts, fonts, getLook, setLook, usePalette, withAlpha, type Look, type Palette } from "./theme";
 import {
   PACK_BY_ID,
   THEMES,
@@ -85,6 +85,7 @@ import {
   newUnlockables,
   requirementText,
   themePalette,
+  themeName,
   type PackId,
   type Theme,
   type ThemeId,
@@ -114,6 +115,7 @@ import {
   saveEffects,
   saveHaptics,
   saveMode,
+  saveLook,
   saveSprint,
   saveZen,
   saveRush,
@@ -134,6 +136,8 @@ import {
   type DailyStreak,
 } from "./storage";
 import { useKeyboardHeight } from "./useKeyboardHeight";
+import { CourtMenu, PauseIcon, ShieldIcon, type CourtMenuProps } from "./court";
+import { LinearGradient } from "expo-linear-gradient";
 import {
   BONUS,
   BONUS_POWERUPS,
@@ -379,7 +383,14 @@ export default function Game() {
   const [reminder, setReminder] = useState<ReminderPrefs>({ on: false, hour: DEFAULT_REMINDER_HOUR, asked: false });
   const reminderRef = useRef<ReminderPrefs>(reminder);
   // Themes other than Classic need Pro to use (they still unlock through achievements).
-  const { c: baseColors, dark: isDark } = themePalette(pro ? themeId : "classic", systemDark);
+  // The overall look (Royal Court by default, or the original Modern design). Set before any styles are made.
+  const [look, setLookState] = useState<Look>("court");
+  setLook(look);
+  // Developer builds only: try every theme and word pack without earning them or buying Pro.
+  const [devUnlockAll, setDevUnlockAll] = useState(false);
+  const devUnlockRef = useRef(false);
+  const canStyle = pro || devUnlockAll; // may use non-Classic themes and packs
+  const { c: baseColors, dark: isDark } = themePalette(canStyle ? themeId : "classic", systemDark);
   const insets = useSafeAreaInsets();
   const kbHeight = useKeyboardHeight();
   const { width } = useWindowDimensions();
@@ -500,6 +511,7 @@ export default function Game() {
       setMuted(p.muted);
       setMusicOnState(p.music);
       setMusicEnabled(p.music);
+      setLookState(p.look);
       setModeState(p.mode);
       modeRef.current = p.mode;
       setHapticsOn(p.haptics);
@@ -870,7 +882,7 @@ export default function Game() {
       G.phoenix = true; // the Tower reward (not in the Daily, so everyone plays it the same)
     }
     // The Daily always uses the standard words; other packs need Pro.
-    G.pack = daily || !proRef.current ? null : PACK_BY_ID[packRef.current].words;
+    G.pack = daily || !(proRef.current || devUnlockRef.current) ? null : PACK_BY_ID[packRef.current].words;
     if (daily) {
       const today = todayKey();
       G.daily = true;
@@ -1652,16 +1664,20 @@ export default function Game() {
   };
 
   const chooseTheme = (t: Theme) => {
-    if (!meetsRequirement(t.requires, unlockedRef.current)) return;
-    if (t.id !== "classic" && !proRef.current) return openPaywall();
+    if (!devUnlockRef.current) {
+      if (!meetsRequirement(t.requires, unlockedRef.current)) return;
+      if (t.id !== "classic" && !proRef.current) return openPaywall();
+    }
     setThemeId(t.id);
     saveTheme(t.id);
     buzz.select().catch(() => {});
   };
 
   const choosePack = (p: WordPack) => {
-    if (!meetsRequirement(p.requires, unlockedRef.current)) return;
-    if (p.id !== "classic" && !proRef.current) return openPaywall();
+    if (!devUnlockRef.current) {
+      if (!meetsRequirement(p.requires, unlockedRef.current)) return;
+      if (p.id !== "classic" && !proRef.current) return openPaywall();
+    }
     setPackId(p.id);
     packRef.current = p.id;
     savePack(p.id);
@@ -1708,6 +1724,13 @@ export default function Game() {
       setShowPaywall(false);
       setPaywallMsg("");
     } else setPaywallMsg(r.reason);
+  };
+
+  const toggleLook = (royal: boolean) => {
+    const next: Look = royal ? "court" : "modern";
+    setLookState(next);
+    saveLook(next);
+    buzz.select().catch(() => {});
   };
 
   const toggleHaptics = (on: boolean) => {
@@ -1822,6 +1845,100 @@ export default function Game() {
     if (wordsInRound(G.round) > wordsInRound(G.round - 1)) bannerNote += " · Longer round";
   }
 
+  /** Royal Court main menu: what the quest card, Daily card and buttons show for the chosen mode. */
+  const courtMenuProps = (): CourtMenuProps => {
+    const today = todayKey();
+    const rec = dailyRecord?.date === today ? dailyRecord : null;
+    const streakOn = dailyStreak.count > 0 && (dailyStreak.lastDate === today || dailyStreak.lastDate === yesterdayKey());
+    const streakText = streakOn ? `${dailyStreak.count}-day streak` : "";
+    const info = MODE_BY_ID[mode];
+    const n = (v: number) => v.toLocaleString();
+    const pills = DIFFICULTY_ORDER.map(id => ({
+      id,
+      label: DIFFICULTIES[id].label,
+      selected: difficulty === id,
+      onPress: () => chooseDifficulty(id),
+    }));
+    let quest: CourtMenuProps["quest"] = { name: info.name, tagline: info.tagline };
+    let startLabel = `Start ${info.name}`;
+    let difficulties: CourtMenuProps["difficulties"];
+    switch (mode) {
+      case "tower":
+        quest = {
+          name: "Tower Climb",
+          tagline: "Ascend 100 floors and face the Tyrant",
+          progress: tower.checkpoint / TOWER.floors,
+          detail: tower.cleared
+            ? `Summit reached · checkpoint: floor ${tower.checkpoint || "–"}`
+            : tower.checkpoint
+              ? `Checkpoint: floor ${tower.checkpoint} of ${TOWER.floors}`
+              : `Start at floor 1 · ${TOWER.lives} lives`,
+        };
+        startLabel = tower.checkpoint ? `Climb from floor ${tower.checkpoint + 1}` : "Begin the climb";
+        break;
+      case "classic":
+        difficulties = pills;
+        quest.detail = `${DIFFICULTIES[difficulty].words} · best ${n(best[difficulty])}${tower.cleared ? " · Phoenix Feather ready" : ""}`;
+        startLabel = `Begin · ${DIFFICULTIES[difficulty].label}`;
+        break;
+      case "sudden":
+        difficulties = pills;
+        quest.detail = `One life · ${SUDDEN.multiplier}× points · best ${n(suddenBest[difficulty])}`;
+        startLabel = "Face Sudden Death";
+        break;
+      case "sprint":
+        quest.detail = sprintBest.score
+          ? `Best ${n(sprintBest.score)} · ${sprintBest.words} words · ${sprintBest.wpm} wpm`
+          : `No lives · a miss costs ${SPRINT.missPenalty} second`;
+        startLabel = "Start the sprint";
+        break;
+      case "zen":
+        quest.detail = zenBest.wpm ? `Best ${zenBest.wpm} wpm · longest ${zenBest.words} words` : "Wrong letters cost nothing";
+        startLabel = "Enter Zen";
+        break;
+      case "rush":
+        quest.detail = rushBest.bosses ? `Best ${rushBest.bosses} bosses · ${n(rushBest.score)} points` : `${RUSH.lives} lives · a gold bonus after every win`;
+        startLabel = "Begin the rush";
+        break;
+      case "mix":
+        quest.detail = mixBest.score ? `Best ${n(mixBest.score)} · round ${mixBest.round}` : "A new twist every round";
+        startLabel = "Begin the mix";
+        break;
+    }
+    if (isProMode(mode) && !pro) {
+      quest.proNote =
+        trialsLeft(trials, mode, today) > 0 ? "Pro quest · 1 free try today" : "Pro quest · today’s free try is used · tap to unlock";
+    }
+    return {
+      c,
+      topInset: insets.top,
+      bottomInset: insets.bottom,
+      onSettings: openSettings,
+      daily: {
+        eyebrow: `ROYAL DECREE · ${prettyDate(today).toUpperCase()}`,
+        title: rec ? (rec.finished ? `${n(rec.score)} points · round ${rec.round}` : "Today’s try is used") : "Today’s challenge awaits",
+        detail: rec
+          ? `Next decree in ${timeUntilTomorrow()}${streakText ? ` · ${streakText}` : ""}`
+          : `One attempt${streakText ? ` · ${streakText}` : " · same words for everyone"}`,
+        done: !!rec,
+        onPlay: () => startGame(true),
+      },
+      mode,
+      quest,
+      onChangeMode: () => setShowModes(true),
+      onProNote: openPaywall,
+      difficulties,
+      startLabel,
+      onStart: () => startGame(),
+      trophies: `Trophies ${Object.keys(unlocked).length}/${ACHIEVEMENTS.length}`,
+      onCodex: () => setShowHelp(true),
+      onChronicle: () => setShowStats(true),
+      onTrophies: () => setShowAchievements(true),
+      onArmory: () => setShowCustomize(true),
+      royalPass: { show: !pro, price: proPrice, onPress: openPaywall },
+    };
+  };
+
   return (
     <View style={[s.root, { paddingTop: insets.top + 12, paddingBottom: Math.max(insets.bottom, kbHeight) + 12 }]}>
       <StatusBar style={isDark || G.inBoss ? "light" : "dark"} />
@@ -1831,7 +1948,7 @@ export default function Game() {
         <View style={s.stat}>
           <Text style={s.label}>{zenMode ? "WORDS" : "SCORE"}</Text>
           <Text style={s.value}>{zenMode ? G.wordsTyped : G.score.toLocaleString()}</Text>
-          <Text style={s.meta}>
+          <Text style={s.hudMeta}>
             {G.daily
               ? `Daily · ${prettyDate(G.dailyDate)}`
               : zenMode
@@ -1853,13 +1970,20 @@ export default function Game() {
         <View style={[s.stat, { alignItems: "flex-end" }]}>
           <Text style={s.label}>{climbing ? "FLOOR" : sprinting ? "WORDS" : zenMode ? "SPEED" : rushMode ? "BOSS" : "ROUND"}</Text>
           <Text style={s.value}>{sprinting ? G.wordsTyped : zenMode ? zenWpm() : G.round}</Text>
-          <Text style={s.meta}>
+          <Text style={s.hudMeta}>
             {zenMode ? `wpm · ${accuracy} accurate` : sprinting ? `${liveWpm} wpm` : G.inBoss ? `boss · ${G.bossHp} of ${G.bossMaxHp} HP` : `word ${Math.min(G.wordInRound + 1, total)} of ${total}`}
           </Text>
         </View>
       </View>
       <View style={s.livesRow}>
-        <Text style={[s.label, (low || showNoLives) && { color: c.miss }]}>
+        <Text
+          style={[
+            s.label,
+            (low || showNoLives) && { color: c.miss },
+            // Royal Court shows lives as shields only, no "LIVES n" label
+            look === "court" && !showNoLives && !sprinting && !zenMode && { display: "none" },
+          ]}
+        >
           {zenMode
             ? "NO LIVES · NO CLOCK · TAKE YOUR TIME"
             : sprinting
@@ -1871,6 +1995,18 @@ export default function Game() {
         <View style={[s.pips, (showNoLives || sprinting || zenMode) && { display: "none" }]}>
           {pips.slice(0, Math.max(startLives, G.lives)).map((p, i) => {
             const lost = i >= G.lives;
+            if (look === "court") {
+              const many = Math.max(startLives, G.lives) > 6;
+              return (
+                <Animated.View key={i} style={{ transform: [{ scale: p }], opacity: !lost && low ? pulse : 1 }}>
+                  <ShieldIcon
+                    size={many ? 22 : 26}
+                    fill={lost ? c.line : low ? c.miss : "#C8243B"}
+                    stroke={lost ? c.ghost : c.gold}
+                  />
+                </Animated.View>
+              );
+            }
             return (
               <Animated.View
                 key={i}
@@ -1896,9 +2032,18 @@ export default function Game() {
           style={s.bossBar}
           accessibilityLabel={`${G.bossName}: ${G.bossHp} of ${G.bossMaxHp} health left${G.bossArmor > 1 ? `, armored: ${G.bossArmor} words per block` : ""}`}
         >
-          <Text style={[s.label, { color: G.bossArmor > 1 ? c.gold : c.miss }]} numberOfLines={1}>
-            {G.bossArmor > 1 ? "FINAL BOSS" : "BOSS"} · {G.bossName.toUpperCase()}
-          </Text>
+          {look === "court" ? (
+            <>
+              <Text style={[s.label, { color: c.gold, letterSpacing: 3 }]}>{G.bossArmor > 1 ? "FINAL BOSS" : "BOSS"}</Text>
+              <Text style={s.courtBossName} numberOfLines={1}>
+                {G.bossName}
+              </Text>
+            </>
+          ) : (
+            <Text style={[s.label, { color: G.bossArmor > 1 ? c.gold : c.miss }]} numberOfLines={1}>
+              {G.bossArmor > 1 ? "FINAL BOSS" : "BOSS"} · {G.bossName.toUpperCase()}
+            </Text>
+          )}
           <View style={[s.bossHpRow, G.bossArmor > 1 && [s.bossArmored, { borderColor: c.gold }]]}>
             {Array.from({ length: G.bossMaxHp }, (_, i) => {
               const alive = i < G.bossHp;
@@ -1926,8 +2071,8 @@ export default function Game() {
             })}
           </View>
           {G.bossArmor > 1 && (
-            <Text style={[s.meta, { color: c.gold }]} numberOfLines={1}>
-              Armored · {G.bossArmor} words per block{G.bossRegen ? " · heals when you're too slow" : ""}
+            <Text style={[s.meta, { color: c.gold }, look === "court" && { fontSize: 11 }]} numberOfLines={1} adjustsFontSizeToFit>
+              Armored · {G.bossArmor} words per block{G.bossRegen ? " · heals when you're slow" : ""}
             </Text>
           )}
         </View>
@@ -2006,7 +2151,18 @@ export default function Game() {
 
         <View style={s.fuse}>
           <View style={[s.fuseTrack, zenMode && { display: "none" }]}>
-            <Animated.View style={[s.fuseFill, { backgroundColor: c.accent, transform: [{ scaleX: fuse }] }]} />
+            {look === "court" ? (
+              <Animated.View style={[s.fuseFill, { transform: [{ scaleX: fuse }] }]}>
+                <LinearGradient
+                  colors={G.inBoss ? ["#C8243B", "#FF8A3D"] : [c.accent, c.gold]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={StyleSheet.absoluteFill}
+                />
+              </Animated.View>
+            ) : (
+              <Animated.View style={[s.fuseFill, { backgroundColor: c.accent, transform: [{ scaleX: fuse }] }]} />
+            )}
             <Animated.View
               style={[s.fuseFill, s.fuseHot, { backgroundColor: c.miss, opacity: hotOpacity, transform: [{ scaleX: fuse }] }]}
             />
@@ -2049,9 +2205,21 @@ export default function Game() {
       {!sprinting && !zenMode && <PowerUpTray c={c} G={G} onUse={activatePowerUp} onUseBonus={activateBonus} />}
 
       <View style={s.controls}>
-        <Pressable style={s.chip} onPress={() => (G.phase === "paused" ? resume() : pause())} hitSlop={8}>
-          <Text style={s.chipText}>{G.phase === "paused" ? "RESUME" : "PAUSE"}</Text>
-        </Pressable>
+        {look === "court" ? (
+          <Pressable
+            style={s.courtRound}
+            onPress={() => (G.phase === "paused" ? resume() : pause())}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={G.phase === "paused" ? "Resume" : "Pause"}
+          >
+            <PauseIcon color={c.gold} />
+          </Pressable>
+        ) : (
+          <Pressable style={s.chip} onPress={() => (G.phase === "paused" ? resume() : pause())} hitSlop={8}>
+            <Text style={s.chipText}>{G.phase === "paused" ? "RESUME" : "PAUSE"}</Text>
+          </Pressable>
+        )}
         {zenMode && G.phase !== "over" && G.phase !== "title" && (
           <Pressable
             style={[s.chip, { borderColor: c.accent }]}
@@ -2063,10 +2231,10 @@ export default function Game() {
             <Text style={[s.chipText, { color: c.accent }]}>FINISH</Text>
           </Pressable>
         )}
-        <Pressable style={s.chip} onPress={toggleMute} hitSlop={8}>
+        <Pressable style={[s.chip, look === "court" && { display: "none" }]} onPress={toggleMute} hitSlop={8}>
           <Text style={s.chipText}>{muted ? "SOUND OFF" : "SOUND ON"}</Text>
         </Pressable>
-        <Pressable style={s.chip} onPress={toggleMusic} hitSlop={8}>
+        <Pressable style={[s.chip, look === "court" && { display: "none" }]} onPress={toggleMusic} hitSlop={8}>
           <Text style={s.chipText}>{musicOn ? "MUSIC ON" : "MUSIC OFF"}</Text>
         </Pressable>
       </View>
@@ -2109,7 +2277,9 @@ export default function Game() {
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, s.flash, { opacity: flash }]} />
 
       {/* Overlays */}
-      {G.phase === "title" && (
+      {G.phase === "title" && look === "court" && <CourtMenu {...courtMenuProps()} />}
+
+      {G.phase === "title" && look !== "court" && (
         <Overlay c={c} pop={overlayPop}>
           <View style={s.achHead}>
             <Text style={[s.eyebrow, { flex: 1, paddingTop: 6 }]}>A TYPING SURVIVAL GAME</Text>
@@ -2394,9 +2564,9 @@ export default function Game() {
                 c={c}
                 t={t}
                 preview={themePalette(t.id, systemDark).c}
-                open={meetsRequirement(t.requires, unlocked) && (pro || t.id === "classic")}
-                needsPro={meetsRequirement(t.requires, unlocked) && !pro && t.id !== "classic"}
-                selected={(pro ? themeId : "classic") === t.id}
+                open={devUnlockAll || (meetsRequirement(t.requires, unlocked) && (pro || t.id === "classic"))}
+                needsPro={!devUnlockAll && meetsRequirement(t.requires, unlocked) && !pro && t.id !== "classic"}
+                selected={(canStyle ? themeId : "classic") === t.id}
                 onPress={() => chooseTheme(t)}
               />
             ))}
@@ -2408,9 +2578,9 @@ export default function Game() {
                 key={p.id}
                 c={c}
                 p={p}
-                open={meetsRequirement(p.requires, unlocked) && (pro || p.id === "classic")}
-                needsPro={meetsRequirement(p.requires, unlocked) && !pro && p.id !== "classic"}
-                selected={(pro ? packId : "classic") === p.id}
+                open={devUnlockAll || (meetsRequirement(p.requires, unlocked) && (pro || p.id === "classic"))}
+                needsPro={!devUnlockAll && meetsRequirement(p.requires, unlocked) && !pro && p.id !== "classic"}
+                selected={(canStyle ? packId : "classic") === p.id}
                 onPress={() => choosePack(p)}
               />
             ))}
@@ -2535,6 +2705,18 @@ export default function Game() {
             </Pressable>
           </View>
 
+          <Text style={s.label}>LOOK</Text>
+          <View style={s.setGroup}>
+            <SettingRow
+              c={c}
+              label="Royal Court design"
+              detail="Gold trim, carved titles and shield lives. Turn off for the original clean design."
+              value={look === "court"}
+              onChange={toggleLook}
+              last
+            />
+          </View>
+
           <Text style={s.label}>SOUND</Text>
           <View style={s.setGroup}>
             <SettingRow c={c} label="Sound effects" detail="Key clicks, misses and fanfares" value={!muted} onChange={toggleMute} />
@@ -2613,6 +2795,19 @@ export default function Game() {
               {__DEV__ && (
                 <>
                   <Text style={s.label}>DEVELOPER (TEST BUILDS ONLY)</Text>
+                  <View style={s.setGroup}>
+                    <SettingRow
+                      c={c}
+                      label="Unlock all themes & packs"
+                      detail="Try every color theme and word pack in Customize. Doesn't save, unlock achievements or give Pro."
+                      value={devUnlockAll}
+                      onChange={on => {
+                        devUnlockRef.current = on;
+                        setDevUnlockAll(on);
+                      }}
+                      last
+                    />
+                  </View>
                   <View style={s.btnGrid}>
                     <View style={s.btnHalf}>
                       <Btn c={c} label="Fight Typo Tyrant" onPress={() => devClimb(TOWER.floors)} secondary />
@@ -2774,7 +2969,8 @@ export default function Game() {
         </Overlay>
       )}
 
-      {G.phase === "paused" && (
+      {/* Hidden while Settings is open on top of a paused game; closing Settings brings it back. */}
+      {G.phase === "paused" && !showSettings && (
         <Overlay c={c} pop={overlayPop}>
           <Text style={s.eyebrow}>PAUSED</Text>
           <Text style={s.h2}>Take a breath</Text>
@@ -3224,7 +3420,7 @@ function ThemeCard({
       style={[s.diffCard, { gap: 6 }, selected && { borderColor: c.accent, backgroundColor: c.accentSoft }]}
       accessibilityRole="radio"
       accessibilityState={{ selected, disabled: !open }}
-      accessibilityLabel={`${t.name} theme${open ? "" : `, locked. ${requirementText(t.requires)}`}`}
+      accessibilityLabel={`${themeName(t)} theme${open ? "" : `, locked. ${requirementText(t.requires)}`}`}
     >
       <View style={[s.themeSwatch, { backgroundColor: p.bg, borderColor: p.line, opacity: open ? 1 : 0.45 }]}>
         <Text style={[s.themeWord, { color: p.ink }]} allowFontScaling={false}>
@@ -3239,10 +3435,12 @@ function ThemeCard({
       </View>
       <Text style={[s.slotName, { color: selected ? c.accent : open ? c.ink : c.muted }]}>
         {open ? "" : "🔒 "}
-        {t.name}
+        {themeName(t)}
       </Text>
       {open ? (
-        <Text style={s.slotEffect}>{t.palette ? (selected ? "In use" : "Unlocked") : "Follows your phone"}</Text>
+        <Text style={s.slotEffect}>
+          {t.palette ? (selected ? "In use" : "Unlocked") : getLook() === "court" ? (selected ? "Default · in use" : "Default") : "Follows your phone"}
+        </Text>
       ) : needsPro ? (
         <Text style={[s.slotEffect, { color: c.gold }]}>Earned · needs Pro</Text>
       ) : (
@@ -3371,7 +3569,7 @@ function DailyCard({
   if (record) {
     return (
       <View style={[s.dailyCard, s.dailyDone]} accessibilityLabel="Today's Daily Challenge is done">
-        <Text style={[s.label, { color: c.gold }]}>DAILY CHALLENGE · {prettyDate(today).toUpperCase()}</Text>
+        <Text style={[s.label, { color: c.gold }]}>{getLook() === "court" ? "ROYAL DECREE" : "DAILY CHALLENGE"} · {prettyDate(today).toUpperCase()}</Text>
         <Text style={s.dailyTitle}>
           {record.finished ? `${record.score.toLocaleString()} points · round ${record.round}` : "Today's try is used up"}
         </Text>
@@ -3389,7 +3587,7 @@ function DailyCard({
       accessibilityRole="button"
       accessibilityLabel="Play today's Daily Challenge"
     >
-      <Text style={[s.label, { color: c.gold }]}>DAILY CHALLENGE · {prettyDate(today).toUpperCase()}</Text>
+      <Text style={[s.label, { color: c.gold }]}>{getLook() === "court" ? "ROYAL DECREE" : "DAILY CHALLENGE"} · {prettyDate(today).toUpperCase()}</Text>
       <Text style={s.dailyTitle}>Play today’s challenge</Text>
       <Text style={s.slotEffect}>
         Same words for everyone today · Medium rules · one try{streakText}
@@ -3418,7 +3616,7 @@ function ComboBadge({
         <Animated.Text style={[s.value, { color: streak > 0 ? c.good : c.ghost, transform: [{ scale: pop }] }]}>
           {streak}
         </Animated.Text>
-        <Text style={s.meta}>clean words</Text>
+        <Text style={s.hudMeta}>clean words</Text>
       </View>
     );
   }
@@ -3431,7 +3629,7 @@ function ComboBadge({
       <Animated.Text style={[s.value, { color: active ? c.gold : c.ghost, transform: [{ scale: pop }] }]}>
         ×{mult}
       </Animated.Text>
-      <Text style={s.meta} numberOfLines={1}>
+      <Text style={s.hudMeta} numberOfLines={1}>
         {next ? `${streak} · ${next.at - streak} to ×${next.mult}` : `${streak} · max`}
       </Text>
     </View>
@@ -3472,6 +3670,74 @@ function PowerUpTray({
   if (G.phoenix) active.push({ text: "Phoenix ready", color: c.gold });
   if (G.doubleWords > 0) active.push({ text: `2× points · ${G.doubleWords} word${G.doubleWords > 1 ? "s" : ""}`, color: c.gold });
   if (G.tripleWords > 0) active.push({ text: `3× points · ${G.tripleWords} word${G.tripleWords > 1 ? "s" : ""}`, color: c.gold });
+
+  // Royal Court: one row of cards (the gold bonus joins it), no header.
+  if (getLook() === "court") {
+    const card = (key: string, name: string, effect: string, color: string, onPress: () => void, label: string, bonus = false) => (
+      <Pressable
+        key={key}
+        onPress={onPress}
+        disabled={!canUse}
+        style={({ pressed }) => [
+          s.courtCard,
+          { borderColor: color, opacity: canUse ? 1 : 0.5 },
+          bonus && { backgroundColor: withAlpha(c.gold, 0.12) },
+          pressed && { transform: [{ scale: 0.96 }] },
+        ]}
+        accessibilityRole="button"
+        accessibilityLabel={label}
+      >
+        <Text style={[s.courtCardName, { color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+          {name}
+        </Text>
+        <Text style={s.courtCardEffect} numberOfLines={2}>
+          {effect}
+        </Text>
+      </Pressable>
+    );
+    return (
+      <View style={s.tray}>
+        <View style={s.slots}>
+          {Array.from({ length: REWARDS.bucketSize }, (_, i) => {
+            const id = G.inventory[i];
+            if (!id)
+              return (
+                <View key={i} style={[s.courtCard, s.slotEmpty]}>
+                  <Text style={s.slotEmptyText}>{full ? "" : "Empty"}</Text>
+                </View>
+              );
+            return card(
+              String(i),
+              POWERUPS[id].name,
+              POWERUPS[id].effect.toLowerCase(),
+              powerUpColor(c, id),
+              () => onUse(i),
+              `Use ${POWERUPS[id].name}: ${POWERUPS[id].effect}`,
+            );
+          })}
+          {G.bonus &&
+            card(
+              "bonus",
+              BONUS_POWERUPS[G.bonus].name,
+              "gold bonus",
+              c.gold,
+              onUseBonus,
+              `Use bonus ${BONUS_POWERUPS[G.bonus].name}: ${BONUS_POWERUPS[G.bonus].effect}`,
+              true,
+            )}
+        </View>
+        {active.length > 0 && (
+          <View style={s.activeRow}>
+            {active.map(a => (
+              <View key={a.text} style={[s.activeChip, { borderColor: a.color }]}>
+                <Text style={[s.activeText, { color: a.color }]}>{a.text}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    );
+  }
 
   return (
     <View style={s.tray}>
@@ -3784,32 +4050,56 @@ function Btn({
       ]}
       accessibilityRole="button"
     >
-      <Text style={[s.btnText, secondary && { color: c.ink }]}>{label}</Text>
+      <Text style={[s.btnText, secondary && { color: c.ink }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
 
 /* ---------- styles ---------- */
 
-const cache = new Map<Palette, ReturnType<typeof make>>();
+const cache = new Map<string, Map<Palette, ReturnType<typeof make>>>();
 function styles(c: Palette) {
-  let v = cache.get(c);
-  if (!v) cache.set(c, (v = make(c)));
+  const look = getLook();
+  let byPalette = cache.get(look);
+  if (!byPalette) cache.set(look, (byPalette = new Map()));
+  let v = byPalette.get(c);
+  if (!v) byPalette.set(c, (v = make(c)));
   return v;
 }
 
 function make(c: Palette) {
+  // Royal Court: carved serif titles and labels, squarer corners, gold trim, chunky primary buttons.
+  const court = getLook() === "court";
+  const F = court ? courtFonts : fonts;
+  const R = court ? 6 : 12; // card corners
+  const pill = court ? 6 : 999; // chip corners
+  const trim = court ? withAlpha(c.gold, 0.45) : c.line;
+  const caps = court ? courtFonts.displayMedium : fonts.bodyStrong; // small labels
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: c.bg, paddingHorizontal: 18 },
     hud: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", gap: 8 },
     combo: { alignItems: "center", flexShrink: 1 },
     stat: { gap: 2 },
-    label: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1.3, color: c.muted },
-    value: { fontFamily: fonts.display, fontSize: 30, lineHeight: 34, color: c.ink, fontVariant: ["tabular-nums"] },
+    label: { fontFamily: caps, fontSize: 11, letterSpacing: court ? 1.8 : 1.3, color: c.muted },
+    value: { fontFamily: F.display, fontSize: court ? 24 : 30, lineHeight: court ? 30 : 34, color: c.ink, fontVariant: ["tabular-nums"] },
     meta: { fontFamily: fonts.body, fontSize: 13, color: c.muted },
+    hudMeta: court ? { display: "none" } : { fontFamily: fonts.body, fontSize: 13, color: c.muted },
     livesRow: { marginTop: 14, alignItems: "center", gap: 6 },
     pips: { flexDirection: "row", gap: 5 },
-    pip: { width: 22, height: 16, borderRadius: 3 },
+    pip: court
+      ? {
+          width: 17,
+          height: 21,
+          borderTopLeftRadius: 3,
+          borderTopRightRadius: 3,
+          borderBottomLeftRadius: 9,
+          borderBottomRightRadius: 9,
+          borderWidth: 1.5,
+          borderColor: c.gold, // shields
+        }
+      : { width: 22, height: 16, borderRadius: 3 },
 
     stage: { flex: 1, alignItems: "center", justifyContent: "center", gap: 28 },
     wordWrap: { alignItems: "center", justifyContent: "flex-end" },
@@ -3817,10 +4107,12 @@ function make(c: Palette) {
     letterBox: { alignItems: "center", borderRadius: 8, paddingHorizontal: 1 },
     letter: { fontFamily: fonts.word, includeFontPadding: false },
     underline: { alignSelf: "stretch", marginHorizontal: "8%", borderRadius: 2, marginTop: 2 },
-    float: { position: "absolute", top: -34, width: 340, textAlign: "center", fontFamily: fonts.display, fontSize: 22 },
+    float: { position: "absolute", top: -34, width: 340, textAlign: "center", fontFamily: F.display, fontSize: 22 },
 
     fuse: { width: "100%", maxWidth: 560, gap: 8 },
-    fuseTrack: { height: 10, borderRadius: 999, backgroundColor: c.line, overflow: "hidden" },
+    fuseTrack: court
+      ? { height: 12, borderRadius: 6, backgroundColor: c.line, borderWidth: 1, borderColor: trim, overflow: "hidden" }
+      : { height: 10, borderRadius: 999, backgroundColor: c.line, overflow: "hidden" },
     fuseFill: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, borderRadius: 999, transformOrigin: "left" },
     fuseHot: {},
     fuseRow: { flexDirection: "row", justifyContent: "space-between" },
@@ -3830,18 +4122,18 @@ function make(c: Palette) {
     dailyCard: {
       borderWidth: 1.5,
       borderColor: c.gold,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 12,
       paddingVertical: 10,
       gap: 3,
       backgroundColor: c.surface,
     },
     dailyDone: { borderStyle: "dashed", backgroundColor: "transparent" },
-    dailyTitle: { fontFamily: fonts.display, fontSize: 19, color: c.ink },
+    dailyTitle: { fontFamily: F.display, fontSize: 19, color: c.ink },
     bonusSlot: {
       borderWidth: 1.5,
       borderColor: c.gold,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 10,
       paddingVertical: 6,
       backgroundColor: c.surface,
@@ -3849,18 +4141,54 @@ function make(c: Palette) {
     },
     bonusRow: { flexDirection: "row", alignItems: "baseline", gap: 8 },
     bonusEmpty: { borderStyle: "dashed", backgroundColor: "transparent", alignItems: "center", paddingVertical: 8 },
-    bossBar: { marginTop: 14, gap: 6, alignItems: "center" },
+    bossBar: court
+      ? {
+          marginTop: 12,
+          gap: 8,
+          alignItems: "center",
+          padding: 12,
+          borderWidth: 1,
+          borderColor: trim,
+          borderRadius: 8,
+          backgroundColor: c.surface,
+        }
+      : { marginTop: 14, gap: 6, alignItems: "center" },
+    courtCard: {
+      flex: 1,
+      minHeight: 60,
+      borderWidth: 1,
+      borderRadius: 8,
+      backgroundColor: c.surface,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 4,
+      paddingVertical: 8,
+      gap: 2,
+    },
+    courtCardName: { fontFamily: courtFonts.displayMedium, fontSize: 13, textAlign: "center" },
+    courtCardEffect: { fontFamily: fonts.body, fontSize: 10, lineHeight: 13, color: c.muted, textAlign: "center" },
+    courtBossName: { fontFamily: courtFonts.display, fontSize: 22, color: c.ink, textAlign: "center" },
+    courtRound: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: trim,
+      alignItems: "center",
+      justifyContent: "center",
+    },
     bossHpRow: { flexDirection: "row", gap: 6, alignSelf: "stretch", justifyContent: "center" },
     bossArmored: { borderWidth: 2, borderRadius: 8, padding: 4, gap: 4 },
     bossCrack: { position: "absolute", right: 0, top: 0, bottom: 0 },
     bossHpSeg: { flex: 1, maxWidth: 70, height: 10, borderRadius: 3, overflow: "hidden" },
     bossName: {
-      fontFamily: fonts.display,
+      fontFamily: F.display,
       fontSize: 44,
       lineHeight: 48,
       color: c.ink,
       textAlign: "center",
-      letterSpacing: -1,
+      letterSpacing: court ? 0.5 : -1,
       paddingHorizontal: 12,
     },
     trayHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", gap: 10 },
@@ -3869,7 +4197,7 @@ function make(c: Palette) {
       flex: 1,
       minHeight: 56,
       borderWidth: 1.5,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 8,
       paddingVertical: 7,
       backgroundColor: c.surface,
@@ -3877,14 +4205,14 @@ function make(c: Palette) {
     },
     slotEmpty: { borderStyle: "dashed", borderColor: c.line, backgroundColor: "transparent", alignItems: "center", justifyContent: "center" },
     slotEmptyText: { fontFamily: fonts.body, fontSize: 12, color: c.ghost },
-    slotName: { fontFamily: fonts.display, fontSize: 15 },
+    slotName: { fontFamily: F.display, fontSize: 15 },
     slotEffect: { fontFamily: fonts.body, fontSize: 11, lineHeight: 14, color: c.muted },
     activeRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-    activeChip: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 },
+    activeChip: { borderWidth: 1, borderRadius: pill, paddingHorizontal: 8, paddingVertical: 2 },
     activeText: { fontFamily: fonts.bodyStrong, fontSize: 11 },
     controls: { flexDirection: "row", justifyContent: "center", gap: 10 },
-    chip: { borderWidth: 1, borderColor: c.line, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
-    chipText: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1, color: c.muted },
+    chip: { borderWidth: 1, borderColor: trim, borderRadius: pill, paddingHorizontal: 12, paddingVertical: 6 },
+    chipText: { fontFamily: caps, fontSize: 11, letterSpacing: court ? 1.4 : 1, color: c.muted },
 
     hiddenInput: { position: "absolute", width: 1, height: 1, opacity: 0, left: -10, top: 0 },
     // Wide enough that the sample is never clipped; parked above the screen.
@@ -3896,9 +4224,9 @@ function make(c: Palette) {
       width: "100%",
       maxWidth: 520,
       backgroundColor: c.surface,
-      borderRadius: 18,
-      borderWidth: 1,
-      borderColor: c.line,
+      borderRadius: court ? 10 : 18,
+      borderWidth: court ? 1.5 : 1,
+      borderColor: trim,
       maxHeight: "100%",
       overflow: "hidden",
     },
@@ -3907,20 +4235,22 @@ function make(c: Palette) {
     diffCard: {
       width: "48.5%",
       borderWidth: 1.5,
-      borderColor: c.line,
-      borderRadius: 12,
+      borderColor: trim,
+      borderRadius: R,
       paddingHorizontal: 12,
       paddingVertical: 10,
       gap: 2,
     },
-    diffLabel: { fontFamily: fonts.display, fontSize: 19, color: c.ink },
+    diffLabel: { fontFamily: F.display, fontSize: 19, color: c.ink },
     diffDetail: { fontFamily: fonts.bodyStrong, fontSize: 12, color: c.ink, fontVariant: ["tabular-nums"] },
     diffWords: { fontFamily: fonts.body, fontSize: 12, lineHeight: 16, color: c.muted },
     diffBest: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.good, marginTop: 2 },
-    btnSecondary: { backgroundColor: "transparent", borderWidth: 1, borderColor: c.line },
-    eyebrow: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1.6, color: c.accent },
-    h1: { fontFamily: fonts.display, fontSize: 48, lineHeight: 50, color: c.ink, letterSpacing: -1 },
-    h2: { fontFamily: fonts.display, fontSize: 34, lineHeight: 38, color: c.ink, letterSpacing: -0.5 },
+    btnSecondary: { backgroundColor: "transparent", borderWidth: 1, borderColor: trim, borderBottomWidth: 1, borderBottomColor: trim },
+    eyebrow: { fontFamily: caps, fontSize: 11, letterSpacing: court ? 2.4 : 1.6, color: c.accent },
+    h1: court
+      ? { fontFamily: F.display, fontSize: 40, lineHeight: 46, color: c.gold, letterSpacing: 2, textAlign: "center" }
+      : { fontFamily: F.display, fontSize: 48, lineHeight: 50, color: c.ink, letterSpacing: -1 },
+    h2: { fontFamily: F.display, fontSize: court ? 30 : 34, lineHeight: 38, color: c.ink, letterSpacing: court ? 0.5 : -0.5 },
     body: { fontFamily: fonts.body, fontSize: 15, lineHeight: 22, color: c.muted },
     demo: { fontFamily: fonts.word, fontSize: 30 },
     rule: { flexDirection: "row", gap: 12 },
@@ -3928,10 +4258,23 @@ function make(c: Palette) {
     ruleText: { flex: 1, fontFamily: fonts.body, fontSize: 14, lineHeight: 20, color: c.ink },
     results: { flexDirection: "row", flexWrap: "wrap", rowGap: 14 },
     result: { width: "50%", gap: 2 },
-    btn: { backgroundColor: c.accent, borderRadius: 12, paddingVertical: 15, alignItems: "center" },
-    btnText: { fontFamily: fonts.bodyStrong, fontSize: 16, color: c.onAccent },
+    btn: court
+      ? {
+          backgroundColor: c.accent,
+          borderRadius: R,
+          paddingVertical: 14,
+          alignItems: "center",
+          borderWidth: 1,
+          borderColor: "rgba(0, 0, 0, 0.25)",
+          borderBottomWidth: 5, // a chunky, pressable edge
+          borderBottomColor: "rgba(0, 0, 0, 0.4)",
+        }
+      : { backgroundColor: c.accent, borderRadius: R, paddingVertical: 15, alignItems: "center" },
+    btnText: court
+      ? { fontFamily: courtFonts.display, fontSize: 15, letterSpacing: 1.2, color: c.onAccent }
+      : { fontFamily: fonts.bodyStrong, fontSize: 16, color: c.onAccent },
 
-    setGroup: { borderWidth: 1, borderColor: c.line, borderRadius: 12, paddingHorizontal: 12, marginTop: -6 },
+    setGroup: { borderWidth: 1, borderColor: trim, borderRadius: R, paddingHorizontal: 12, marginTop: -6 },
     setRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 11 },
     modeButton: {
       flexDirection: "row",
@@ -3940,13 +4283,13 @@ function make(c: Palette) {
       borderWidth: 1.5,
       borderColor: c.accent,
       backgroundColor: c.accentSoft,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 12,
       paddingVertical: 10,
       marginTop: -6,
     },
-    modeCard: { borderWidth: 1.5, borderColor: c.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, gap: 2 },
-    towerCard: { borderWidth: 1.5, borderColor: c.line, borderRadius: 12, padding: 12, gap: 8 },
+    modeCard: { borderWidth: 1.5, borderColor: trim, borderRadius: R, paddingHorizontal: 12, paddingVertical: 10, gap: 2 },
+    towerCard: { borderWidth: 1.5, borderColor: trim, borderRadius: R, padding: 12, gap: 8 },
     towerTrack: { height: 10, borderRadius: 999, backgroundColor: c.bg, overflow: "hidden", justifyContent: "center" },
     towerFill: { position: "absolute", left: 0, top: 0, bottom: 0, borderRadius: 999 },
     towerMark: { position: "absolute", width: 2, height: 10, marginLeft: -2 },
@@ -3964,7 +4307,7 @@ function make(c: Palette) {
       overflow: "hidden",
     },
     proLine: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: -6 },
-    proCta: { borderWidth: 1.5, borderColor: c.gold, borderRadius: 12, padding: 12, gap: 3, backgroundColor: c.surface },
+    proCta: { borderWidth: 1.5, borderColor: c.gold, borderRadius: R, padding: 12, gap: 3, backgroundColor: c.surface },
     proPerk: { flexDirection: "row", alignItems: "center", gap: 10 },
     shareGrid: { alignItems: "center", gap: 6, paddingVertical: 4 },
     shareGridText: { fontSize: 22, lineHeight: 28, textAlign: "center", letterSpacing: 2 },
@@ -3988,16 +4331,16 @@ function make(c: Palette) {
       gap: 10,
       borderWidth: 1,
       borderColor: c.line,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 10,
       paddingVertical: 8,
     },
-    achMark: { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, alignItems: "center", justifyContent: "center" },
+    achMark: { width: 24, height: 24, borderRadius: R, borderWidth: 1.5, alignItems: "center", justifyContent: "center" },
     achMarkText: { fontFamily: fonts.bodyStrong, fontSize: 13, lineHeight: 16 },
     achBarRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 3 },
     achCount: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.muted, fontVariant: ["tabular-nums"] },
     achDate: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.gold },
-    achNew: { borderWidth: 1.5, borderColor: c.gold, borderRadius: 12, padding: 10, gap: 3 },
+    achNew: { borderWidth: 1.5, borderColor: c.gold, borderRadius: R, padding: 10, gap: 3 },
     toast: {
       position: "absolute",
       left: 18,
@@ -4017,11 +4360,12 @@ function make(c: Palette) {
       shadowOffset: { width: 0, height: 4 },
       elevation: 8,
     },
-    toastName: { fontFamily: fonts.display, fontSize: 20, color: c.ink },
+    toastName: { fontFamily: F.display, fontSize: 20, color: c.ink },
     bannerWrap: { alignItems: "center", justifyContent: "center", backgroundColor: c.scrim },
     banner: { alignItems: "center", gap: 6 },
-    bannerBig: { fontFamily: fonts.display, fontSize: 110, lineHeight: 112, color: c.ink, letterSpacing: -3 },
+    bannerBig: { fontFamily: F.display, fontSize: court ? 96 : 110, lineHeight: 112, color: c.ink, letterSpacing: court ? 0 : -3 },
     bannerSub: { fontFamily: fonts.body, fontSize: 15, color: c.muted },
     bannerNote: { fontFamily: fonts.bodyStrong, fontSize: 14, color: c.accent },
+
   });
 }
