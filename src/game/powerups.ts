@@ -41,14 +41,16 @@ export function rewardThreshold(earned: number): number {
 }
 
 /** A random power-up, weighted. */
-export function rollPowerUp(random = Math.random): PowerUpId {
-  const total = ALL.reduce((sum, p) => sum + p.weight, 0);
+/** `skip`: power-ups this mode doesn't allow (Sudden Death has no Extra Life). */
+export function rollPowerUp(random = Math.random, skip: PowerUpId[] = []): PowerUpId {
+  const pool = ALL.filter(p => !skip.includes(p.id));
+  const total = pool.reduce((sum, p) => sum + p.weight, 0);
   let r = random() * total;
-  for (const p of ALL) {
+  for (const p of pool) {
     r -= p.weight;
     if (r < 0) return p.id;
   }
-  return ALL[ALL.length - 1].id;
+  return pool[pool.length - 1].id;
 }
 
 /* ---------- Bonus power-ups: won by beating a boss, held in the single gold slot ---------- */
@@ -77,8 +79,8 @@ export const BONUS_POWERUPS: Record<BonusId, BonusPowerUp> = {
 const ALL_BONUS = Object.values(BONUS_POWERUPS);
 
 /** A random bonus power-up, weighted; never the same as `exclude` when there's a choice. */
-export function rollBonus(exclude?: BonusId | null, random = Math.random): BonusId {
-  const pool = ALL_BONUS.filter(b => b.id !== exclude);
+export function rollBonus(exclude?: BonusId | null, random = Math.random, skip: BonusId[] = []): BonusId {
+  const pool = ALL_BONUS.filter(b => b.id !== exclude && !skip.includes(b.id));
   const total = pool.reduce((sum, b) => sum + b.weight, 0);
   let r = random() * total;
   for (const b of pool) {

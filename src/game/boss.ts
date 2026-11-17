@@ -45,7 +45,6 @@ export const BOSS_NAMES = [
   "The Dvorak Dread",
   "The Home Row Horror",
   // Typing and typos
-  "The Typo Tyrant",
   "The Misspeller",
   "Madame Mistype",
   "Sir Typo-a-Lot",

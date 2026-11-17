@@ -1,14 +1,14 @@
 {
   "expo": {
-    "name": "TypeSpeedy",
-    "slug": "TypeSpeedy",
+    "name": "Typo Tyrant",
+    "slug": "typo-tyrant",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.typespeedy.app"
+      "bundleIdentifier": "com.typotyrant.app"
     },
     "android": {
       "adaptiveIcon": {
@@ -18,7 +18,7 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.typespeedy.app",
+      "package": "com.typotyrant.app",
       "softwareKeyboardLayoutMode": "pan"
     },
     "web": {
