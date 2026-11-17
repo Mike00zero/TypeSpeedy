@@ -8,7 +8,15 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.typotyrant.app"
+      "bundleIdentifier": "com.typotyrant.app",
+      "infoPlist": {
+        "UISupportedInterfaceOrientations~ipad": [
+          "UIInterfaceOrientationPortrait",
+          "UIInterfaceOrientationPortraitUpsideDown",
+          "UIInterfaceOrientationLandscapeLeft",
+          "UIInterfaceOrientationLandscapeRight"
+        ]
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -39,10 +47,10 @@
         {
           "image": "./assets/splash-icon.png",
           "imageWidth": 240,
-          "backgroundColor": "#1E0D14",
+          "backgroundColor": "#1A0F24",
           "dark": {
             "image": "./assets/splash-icon.png",
-            "backgroundColor": "#1E0D14"
+            "backgroundColor": "#1A0F24"
           }
         }
       ]

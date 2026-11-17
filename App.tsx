@@ -9,14 +9,12 @@ import { Inter_400Regular, Inter_600SemiBold } from "@expo-google-fonts/inter";
 import { Cinzel_600SemiBold, Cinzel_800ExtraBold } from "@expo-google-fonts/cinzel";
 
 import Game from "./src/game/Game";
-import { usePalette } from "./src/game/theme";
 
 // Keep the Typo Tyrant splash up until the game's fonts are ready, then fade it out.
 SplashScreen.preventAutoHideAsync().catch(() => {});
 SplashScreen.setOptions({ duration: 400, fade: true });
 
 export default function App() {
-  const { c } = usePalette();
   const [loaded, error] = useFonts({
     BricolageGrotesque_500Medium,
     BricolageGrotesque_800ExtraBold,
@@ -32,7 +30,8 @@ export default function App() {
     if (ready) SplashScreen.hide();
   }, [ready]);
 
-  if (!ready) return <View style={{ flex: 1, backgroundColor: c.bg }} />;
+  // Matches the splash screen (Sunset purple) so there's no flash while fonts load.
+  if (!ready) return <View style={{ flex: 1, backgroundColor: "#1A0F24" }} />;
 
   return (
     <SafeAreaProvider>

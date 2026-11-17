@@ -303,7 +303,8 @@ export function courtStyles(c: Palette) {
 function make(c: Palette) {
   const trim = withAlpha(c.gold, 0.45); // gold trim, in this theme's gold
   return StyleSheet.create({
-    menu: { paddingHorizontal: 20, gap: 16, flexGrow: 1 },
+    // Centered column, so the menu stays phone-shaped on an iPad.
+    menu: { paddingHorizontal: 20, gap: 16, flexGrow: 1, width: "100%", maxWidth: 520, alignSelf: "center" },
     topRow: { flexDirection: "row", justifyContent: "flex-end" },
     roundBtn: {
       width: 44,

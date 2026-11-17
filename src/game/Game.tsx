@@ -262,6 +262,9 @@ type GameState = {
   careerSaved: boolean; // this game's totals were added to the lifetime stats
 };
 
+/** The play area never gets wider than this (iPad); the rest is background. */
+const MAX_PLAY_WIDTH = 640;
+
 const MAX_LIVES = Math.max(...DIFFICULTY_ORDER.map(id => DIFFICULTIES[id].lives));
 
 function freshState(d: Difficulty): GameState {
@@ -1940,7 +1943,14 @@ export default function Game() {
   };
 
   return (
-    <View style={[s.root, { paddingTop: insets.top + 12, paddingBottom: Math.max(insets.bottom, kbHeight) + 12 }]}>
+    <View
+      style={[
+        s.root,
+        // On wide screens (iPad, especially in landscape) keep the play area a comfortable column.
+        { paddingHorizontal: Math.max(18, (width - MAX_PLAY_WIDTH) / 2) },
+        { paddingTop: insets.top + 12, paddingBottom: Math.max(insets.bottom, kbHeight) + 12 },
+      ]}
+    >
       <StatusBar style={isDark || G.inBoss ? "light" : "dark"} />
 
       {/* HUD */}
@@ -3233,6 +3243,8 @@ export default function Game() {
             s.toast,
             {
               top: insets.top + 6,
+              left: Math.max(18, (width - 480) / 2), // centered on wide screens
+              right: Math.max(18, (width - 480) / 2),
               opacity: toastAnim,
               transform: [{ translateY: toastAnim.interpolate({ inputRange: [0, 1], outputRange: [-30, 0] }) }],
             },
