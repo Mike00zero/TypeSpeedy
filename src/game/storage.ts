@@ -8,6 +8,8 @@ import { DIFFICULTY_ORDER, type DifficultyId } from "./config";
 import { PACK_BY_ID, THEME_BY_ID, type PackId, type ThemeId } from "./unlocks";
 import { EMPTY_TOWER, type TowerProgress } from "./tower";
 import { EMPTY_TRIALS, type ProTrials } from "./pro";
+import { EMPTY_REVIEW, type ReviewState } from "./review";
+import { DEFAULT_REMINDER_HOUR } from "./reminders";
 import {
   EMPTY_MIX,
   EMPTY_RUSH,
@@ -39,6 +41,8 @@ const SUDDEN_KEY = "typespeedy.sudden"; // Sudden Death best score per difficult
 const MIX_KEY = "typespeedy.mix";
 const PRO_KEY = "typespeedy.pro"; // a local copy of Pro ownership (the store is the source of truth)
 const TRIALS_KEY = "typespeedy.proTrials";
+const REVIEW_KEY = "typespeedy.review";
+const REMINDER_KEY = "typespeedy.reminder";
 
 export type BestScores = Record<DifficultyId, number>;
 
@@ -101,6 +105,29 @@ export async function loadSprint(): Promise<SprintBest> {
   } catch {
     return EMPTY_SPRINT;
   }
+}
+
+export type ReminderPrefs = { on: boolean; hour: number; asked: boolean }; // asked: the game-over offer was shown
+const EMPTY_REMINDER: ReminderPrefs = { on: false, hour: DEFAULT_REMINDER_HOUR, asked: false };
+
+export async function loadExtras(): Promise<{ review: ReviewState; reminder: ReminderPrefs }> {
+  try {
+    const [r, m] = await Promise.all([AsyncStorage.getItem(REVIEW_KEY), AsyncStorage.getItem(REMINDER_KEY)]);
+    return {
+      review: r ? { ...EMPTY_REVIEW, ...(JSON.parse(r) as Partial<ReviewState>) } : EMPTY_REVIEW,
+      reminder: m ? { ...EMPTY_REMINDER, ...(JSON.parse(m) as Partial<ReminderPrefs>) } : EMPTY_REMINDER,
+    };
+  } catch {
+    return { review: EMPTY_REVIEW, reminder: EMPTY_REMINDER };
+  }
+}
+
+export function saveReview(r: ReviewState) {
+  AsyncStorage.setItem(REVIEW_KEY, JSON.stringify(r)).catch(() => {});
+}
+
+export function saveReminder(r: ReminderPrefs) {
+  AsyncStorage.setItem(REMINDER_KEY, JSON.stringify(r)).catch(() => {});
 }
 
 export async function loadPro(): Promise<{ pro: boolean; trials: ProTrials }> {

@@ -27,6 +27,8 @@ import { buzz, setHapticsEnabled } from "./haptics";
 import appConfig from "../../app.json";
 import { EMPTY_TRIALS, PRO, isProMode, spendTrial, trialsLeft, type ProTrials } from "./pro";
 import { PURCHASES_TEST_MODE, buyPro, getProPrice, restorePro } from "./purchases";
+import { EMPTY_REVIEW, askForReview, shouldAskForReview, type ReviewState } from "./review";
+import { DEFAULT_REMINDER_HOUR, REMINDER_TIMES, allowReminders, cancelReminders, scheduleReminders } from "./reminders";
 import {
   EMPTY_TOWER,
   PHOENIX,
@@ -98,6 +100,7 @@ import {
   loadSudden,
   loadMix,
   loadPro,
+  loadExtras,
   loadTower,
   loadPrefs,
   saveAchievements,
@@ -117,6 +120,9 @@ import {
   saveSudden,
   saveMix,
   savePro,
+  saveReview,
+  saveReminder,
+  type ReminderPrefs,
   saveTrials,
   saveTower,
   saveMusic,
@@ -248,6 +254,7 @@ type GameState = {
   twistHistory: MixTwistId[];
   twistCardId: number; // bumps when the twist card closes, so its timer can't start the round twice
   giantBosses: number;
+  roundLog: number[]; // wrong letters + timeouts in each cleared round (for the Daily share grid)
   careerSaved: boolean; // this game's totals were added to the lifetime stats
 };
 
@@ -328,6 +335,7 @@ function freshState(d: Difficulty): GameState {
     twistHistory: [],
     twistCardId: 0,
     giantBosses: 0,
+    roundLog: [],
     careerSaved: true, // nothing to save until a game starts
   };
 }
@@ -367,6 +375,9 @@ export default function Game() {
   const [paywallMsg, setPaywallMsg] = useState("");
   const [paywallBusy, setPaywallBusy] = useState(false);
   const [proPrice, setProPrice] = useState(PRO.fallbackPrice);
+  const reviewRef = useRef<ReviewState>(EMPTY_REVIEW);
+  const [reminder, setReminder] = useState<ReminderPrefs>({ on: false, hour: DEFAULT_REMINDER_HOUR, asked: false });
+  const reminderRef = useRef<ReminderPrefs>(reminder);
   // Themes other than Classic need Pro to use (they still unlock through achievements).
   const { c: baseColors, dark: isDark } = themePalette(pro ? themeId : "classic", systemDark);
   const insets = useSafeAreaInsets();
@@ -440,6 +451,13 @@ export default function Game() {
       setTrials(p.trials);
     });
     getProPrice().then(price => price && setProPrice(price));
+    Promise.all([loadExtras(), loadDaily()]).then(([x, d]) => {
+      reviewRef.current = x.review;
+      reminderRef.current = x.reminder;
+      setReminder(x.reminder);
+      // Refresh the week of reminders on every launch (so they never run out).
+      if (x.reminder.on) scheduleReminders(x.reminder.hour, d.record?.date === todayKey(), d.streak.count);
+    });
     loadMix().then(b => {
       mixBestRef.current = b;
       setMixBest(b);
@@ -787,10 +805,11 @@ export default function Game() {
     bump();
   };
 
-  const startGame = (daily = false) => {
+  /** `devFloor`: developer shortcut, start a climb on this floor (see Settings > Developer). */
+  const startGame = (daily = false, devFloor?: number) => {
     if (daily && dailyRecord?.date === todayKey()) return; // one try per day
     // Pro modes: free players get one try per mode per day.
-    if (!daily && isProMode(modeRef.current) && !proRef.current) {
+    if (!daily && isProMode(modeRef.current) && !proRef.current && devFloor === undefined) {
       const today = todayKey();
       if (trialsLeft(trialsRef.current, modeRef.current, today) <= 0) {
         if (G.phase === "over") toTitle();
@@ -844,7 +863,7 @@ export default function Game() {
     } else if (climbing) {
       G.mode = "tower";
       G.lives = TOWER.lives;
-      G.round = towerRef.current.checkpoint + 1; // start at the last checkpoint
+      G.round = devFloor ?? towerRef.current.checkpoint + 1; // start at the last checkpoint
       G.startFloor = G.round;
       updateTower({ ...towerRef.current, climbs: towerRef.current.climbs + 1 });
     } else if (!daily && towerRef.current.cleared) {
@@ -868,6 +887,7 @@ export default function Game() {
       setDailyStreak(streak);
       saveDailyStreak(streak);
       dailyStreakRef.current = streak.count;
+      if (reminderRef.current.on) scheduleReminders(reminderRef.current.hour, true, streak.count); // no reminder today
     } else {
       rng.current = freeStreams();
     }
@@ -1051,6 +1071,7 @@ export default function Game() {
 
   const nextRound = () => {
     if (G.roundMisses === 0) G.perfectRounds++;
+    G.roundLog.push(G.roundMisses);
     if (inTower()) {
       G.floorCleared = G.round;
       if (G.round >= TOWER.floors) return towerComplete();
@@ -1280,10 +1301,22 @@ export default function Game() {
       playMusic(null);
       play("over");
     }
-    setIsNewBest(recordBest() && G.score > 0);
+    const newBest = recordBest() && G.score > 0;
+    setIsNewBest(newBest);
+    if (G.daily) G.roundLog.push(-1); // the round you fell in, for the share grid
     recordDaily();
     checkAchievements(); // end-of-game ones, like Sharpshooter
     saveCareer();
+    // A good moment to ask for a rating: a new best or the Tower summit (never after a plain loss).
+    if ((newBest || G.towerTop) && shouldAskForReview(reviewRef.current, lifetimeRef.current.games)) {
+      later(async () => {
+        if (G.phase !== "over") return;
+        if (await askForReview()) {
+          reviewRef.current = { asks: reviewRef.current.asks + 1, last: Date.now() };
+          saveReview(reviewRef.current);
+        }
+      }, 1800);
+    }
     if (G.newAchievements.length) later(() => play("achieve"), 900); // after the game-over sound
     Keyboard.dismiss();
     popOverlay();
@@ -1360,13 +1393,28 @@ export default function Game() {
   };
 
   const shareDaily = () => {
-    const streak = dailyStreak.count > 1 ? ` (${dailyStreak.count}-day streak)` : "";
-    Share.share({
-      message:
-        `Typo Tyrant Daily Challenge · ${prettyDate(G.dailyDate)}\n` +
-        `${G.score.toLocaleString()} points · reached round ${G.round} · ${G.bossesDefeated} boss${G.bossesDefeated === 1 ? "" : "es"} beaten${streak}\n` +
-        `Same words for everyone today. Can you beat it?`,
-    }).catch(() => {});
+    const accuracyPct = G.keys ? Math.round((G.goodKeys / G.keys) * 100) : 100;
+    const lines = [
+      `Typo Tyrant Daily · ${prettyDate(G.dailyDate)}`,
+      `Round ${G.round} · ${G.bossesDefeated} boss${G.bossesDefeated === 1 ? "" : "es"} · ${G.score.toLocaleString()} pts · ${accuracyPct}%`,
+      dailyGrid(G.roundLog),
+      dailyStreak.count > 1 ? `🔥 ${dailyStreak.count}-day streak` : "",
+      "Same words for everyone today. Can you beat me?",
+    ];
+    Share.share({ message: lines.filter(Boolean).join("\n") }).catch(() => {});
+  };
+
+  /* ---------- Daily reminder ---------- */
+  const updateReminder = async (next: ReminderPrefs) => {
+    if (next.on && !reminderRef.current.on && !(await allowReminders())) {
+      next = { ...next, on: false }; // permission denied
+      addFloat("Turn on notifications in your phone's Settings", "bad");
+    }
+    reminderRef.current = next;
+    setReminder(next);
+    saveReminder(next);
+    if (next.on) scheduleReminders(next.hour, dailyRecord?.date === todayKey(), dailyStreakRef.current);
+    else cancelReminders();
   };
 
   const quitToMenu = () => {
@@ -1694,6 +1742,15 @@ export default function Game() {
     }
     setConfirmReset(null);
     buzz.notify(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+  };
+
+  /** Developer builds only: jump straight to a Tower floor (100 = the Typo Tyrant). */
+  const devClimb = (floor: number) => {
+    if (!__DEV__) return;
+    setShowSettings(false);
+    modeRef.current = "tower";
+    setModeState("tower");
+    startGame(false, floor);
   };
 
   const openSettings = () => {
@@ -2503,6 +2560,33 @@ export default function Game() {
             />
           </View>
 
+          <Text style={s.label}>DAILY CHALLENGE</Text>
+          <View style={s.setGroup}>
+            <SettingRow
+              c={c}
+              label="Daily reminder"
+              detail="A nudge when the new challenge is ready (skipped once you've played)"
+              value={reminder.on}
+              onChange={on => updateReminder({ ...reminder, on, asked: true })}
+              last={!reminder.on}
+            />
+            {reminder.on && (
+              <View style={[s.setRow, { flexWrap: "wrap" }]}>
+                {REMINDER_TIMES.map(t => (
+                  <Pressable
+                    key={t.hour}
+                    onPress={() => updateReminder({ ...reminder, hour: t.hour })}
+                    style={[s.chip, reminder.hour === t.hour && { borderColor: c.accent, backgroundColor: c.accentSoft }]}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: reminder.hour === t.hour }}
+                  >
+                    <Text style={[s.chipText, reminder.hour === t.hour && { color: c.accent }]}>{t.label.toUpperCase()}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+          </View>
+
           {G.phase === "title" && (
             <>
               <Text style={s.label}>TYPO TYRANT PRO</Text>
@@ -2526,6 +2610,22 @@ export default function Game() {
                 </Pressable>
               </View>
               {paywallMsg && !showPaywall ? <Text style={s.slotEffect}>{paywallMsg}</Text> : null}
+              {__DEV__ && (
+                <>
+                  <Text style={s.label}>DEVELOPER (TEST BUILDS ONLY)</Text>
+                  <View style={s.btnGrid}>
+                    <View style={s.btnHalf}>
+                      <Btn c={c} label="Fight Typo Tyrant" onPress={() => devClimb(TOWER.floors)} secondary />
+                    </View>
+                    <View style={s.btnHalf}>
+                      <Btn c={c} label="Climb from floor 91" onPress={() => devClimb(TOWER.floors - 9)} secondary />
+                    </View>
+                  </View>
+                  <Text style={s.slotEffect}>
+                    Only in development builds. Starting doesn’t move your checkpoint, but beating the Typo Tyrant still counts as reaching the top.
+                  </Text>
+                </>
+              )}
               {PURCHASES_TEST_MODE && pro && (
                 <Btn c={c} label="Turn Pro off (test mode only)" onPress={() => setProOwned(false)} secondary />
               )}
@@ -2846,7 +2946,26 @@ export default function Game() {
                 That was today’s try. A new challenge unlocks in {timeUntilTomorrow()}.
                 {dailyStreak.count > 1 ? ` You're on a ${dailyStreak.count}-day streak.` : ""}
               </Text>
+              <View style={s.shareGrid} accessibilityLabel="Your rounds today as colored squares">
+                <Text style={s.shareGridText}>{dailyGrid(G.roundLog)}</Text>
+                <Text style={s.meta}>🟩 clean round · 🟨 1–2 slips · 🟧 3+ · 🟥 where you fell</Text>
+              </View>
               <Btn c={c} label="Share result" onPress={shareDaily} />
+              {!reminder.on && !reminder.asked && Platform.OS !== "web" && (
+                <View style={s.achNew}>
+                  <Text style={[s.ruleText, { fontFamily: fonts.bodyStrong }]}>
+                    Want a reminder when tomorrow’s challenge is ready?
+                  </Text>
+                  <View style={s.btnGrid}>
+                    <View style={s.btnHalf}>
+                      <Btn c={c} label="Remind me" onPress={() => updateReminder({ ...reminder, on: true, asked: true })} />
+                    </View>
+                    <View style={s.btnHalf}>
+                      <Btn c={c} label="No thanks" onPress={() => updateReminder({ ...reminder, asked: true })} secondary />
+                    </View>
+                  </View>
+                </View>
+              )}
               <Btn c={c} label="Main menu" onPress={toTitle} secondary />
             </>
           ) : (
@@ -3491,6 +3610,14 @@ function maxLettersAt(availWidth: number, glyphPerPx: number) {
 }
 
 /** Seconds left on the clock, ticking on its own so the whole game doesn't re-render. */
+/** The Daily share grid: one square per round, 10 to a line. */
+function dailyGrid(log: number[]): string {
+  const squares = log.map(m => (m < 0 ? "🟥" : m === 0 ? "🟩" : m <= 2 ? "🟨" : "🟧"));
+  const rows: string[] = [];
+  for (let i = 0; i < squares.length; i += 10) rows.push(squares.slice(i, i + 10).join(""));
+  return rows.join("\n");
+}
+
 /** Scrambled: the word's letters shuffled, never left in their real order (when that's possible). */
 function scrambleWord(word: string, random: () => number): string {
   if (new Set(word).size < 2) return word;
@@ -3839,6 +3966,8 @@ function make(c: Palette) {
     proLine: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: -6 },
     proCta: { borderWidth: 1.5, borderColor: c.gold, borderRadius: 12, padding: 12, gap: 3, backgroundColor: c.surface },
     proPerk: { flexDirection: "row", alignItems: "center", gap: 10 },
+    shareGrid: { alignItems: "center", gap: 6, paddingVertical: 4 },
+    shareGridText: { fontSize: 22, lineHeight: 28, textAlign: "center", letterSpacing: 2 },
     twistCard: { padding: 22, gap: 12, borderColor: c.gold, borderWidth: 1.5 },
     themeSwatch: {
       borderWidth: 1,

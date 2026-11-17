@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024"><defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1B2140"/><stop offset="0.55" stop-color="#140A1C"/><stop offset="1" stop-color="#2E0A16"/></linearGradient>
+  <radialGradient id="glow" cx="0.5" cy="0.56" r="0.46"><stop offset="0" stop-color="#FF3355" stop-opacity="0.42"/><stop offset="0.6" stop-color="#FF3355" stop-opacity="0.12"/><stop offset="1" stop-color="#FF3355" stop-opacity="0"/></radialGradient>
+  <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFE59A"/><stop offset="1" stop-color="#E3A21E"/></linearGradient>
+  <linearGradient id="red" gradientUnits="userSpaceOnUse" x1="0" y1="414" x2="0" y2="798"><stop offset="0" stop-color="#FF6B7D"/><stop offset="1" stop-color="#E01E3C"/></linearGradient>
+</defs><rect width="1024" height="1024" fill="url(#bg)"/><circle cx="512" cy="540" r="470" fill="url(#glow)"/><g transform="translate(0,-6)">  <!-- crown --><g transform="rotate(-8 512 300) translate(14,4)">
+  <path d="M332 336 L318 186 L428 268 L512 150 L596 268 L706 186 L692 336 Z" fill="url(#gold)"/>
+  <rect x="318" y="318" width="388" height="62" rx="16" fill="url(#gold)"/>
+  <circle cx="318" cy="186" r="28" fill="url(#gold)"/>
+  <circle cx="512" cy="150" r="30" fill="url(#gold)"/>
+  <circle cx="706" cy="186" r="28" fill="url(#gold)"/>
+  <circle cx="512" cy="349" r="17" fill="#FF3355"/>
+  <circle cx="420" cy="349" r="11" fill="#FFF3D1" opacity="0.9"/>
+  <circle cx="604" cy="349" r="11" fill="#FFF3D1" opacity="0.9"/>
+  </g><!-- the red "missed" T -->
+  <path d="M270 414 H754 Q778 414 778 438 V514 Q778 538 754 538 H574 V774 Q574 798 550 798 H474 Q450 798 450 774 V538 H270 Q246 538 246 514 V438 Q246 414 270 414 Z" fill="url(#red)"/>
+  <!-- the miss underline -->
+  <rect x="352" y="846" width="320" height="42" rx="21" fill="#FF4A5C"/></g></svg>
