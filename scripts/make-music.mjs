@@ -1,4 +1,4 @@
-// Generates TypeSpeedy's original chiptune music as WAV files in assets/music.
+// Generates Typo Tyrant's original chiptune music as WAV files in assets/music.
 //   music-main.wav   – upbeat retro loop for normal rounds (C major, 132 BPM, 8 bars)
 //   music-boss.wav   – faster, darker loop for boss fights (A minor, 156 BPM, 8 bars)
 //   victory.wav      – short fanfare when a boss is defeated

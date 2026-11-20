@@ -4,7 +4,7 @@
  */
 import { ACHIEVEMENT_BY_ID, type Unlocked } from "./achievements";
 import { MAX_WORD_LENGTH } from "./config";
-import { darkPalette, lightPalette, type Palette } from "./theme";
+import { courtPalette, darkPalette, getLook, lightPalette, type Palette } from "./theme";
 
 /** What it takes to unlock something: a number of achievements, or one specific achievement. */
 export type Requirement = { free: true } | { count: number } | { achievement: string };
@@ -209,11 +209,25 @@ export const THEMES: Theme[] = [
 
 export const THEME_BY_ID = Object.fromEntries(THEMES.map(t => [t.id, t])) as Record<ThemeId, Theme>;
 
-/** The colors to draw with. Classic follows the phone's light or dark mode. */
+/**
+ * The colors to draw with. In the Royal Court look the default ("classic") theme uses the Sunset
+ * colors, and the Sunset slot holds the original gold-and-stone Court colors (they swapped places).
+ * In the Modern look, Classic follows the phone's light or dark mode.
+ */
 export function themePalette(id: ThemeId, systemDark: boolean): { c: Palette; dark: boolean } {
   const t = THEME_BY_ID[id] ?? THEME_BY_ID.classic;
+  const court = getLook() === "court";
+  if (court && t.id === "classic") return { c: THEME_BY_ID.sunset.palette!, dark: true };
+  if (court && t.id === "sunset") return { c: courtPalette, dark: true };
   if (!t.palette) return { c: systemDark ? darkPalette : lightPalette, dark: systemDark };
   return { c: t.palette, dark: t.dark };
+}
+
+/** A theme's name as shown (Classic and Sunset swap names along with their colors in the Royal Court look). */
+export function themeName(t: Theme): string {
+  if (getLook() === "court" && t.id === "classic") return "Sunset";
+  if (getLook() === "court" && t.id === "sunset") return "Royal Classic";
+  return t.name;
 }
 
 /* ---------- word packs ---------- */
@@ -308,7 +322,7 @@ export const PACK_BY_ID = Object.fromEntries(WORD_PACKS.map(p => [p.id, p])) as 
 export function newUnlockables(before: Unlocked, after: Unlocked): { kind: "theme" | "pack"; name: string }[] {
   const fresh: { kind: "theme" | "pack"; name: string }[] = [];
   for (const t of THEMES)
-    if (meetsRequirement(t.requires, after) && !meetsRequirement(t.requires, before)) fresh.push({ kind: "theme", name: t.name });
+    if (meetsRequirement(t.requires, after) && !meetsRequirement(t.requires, before)) fresh.push({ kind: "theme", name: themeName(t) });
   for (const p of WORD_PACKS)
     if (meetsRequirement(p.requires, after) && !meetsRequirement(p.requires, before)) fresh.push({ kind: "pack", name: p.name });
   return fresh;

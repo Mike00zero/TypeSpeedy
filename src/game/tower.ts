@@ -1,7 +1,7 @@
 /**
  * Tower Climb: 100 floors on Medium rules with only 2 lives. Every 10th floor ends with a guardian
  * boss; beating it saves a checkpoint, so a fall sends you back to your last checkpoint, not floor 1.
- * Clearing floor 100 unlocks the Phoenix Feather for Survival games.
+ * Floor 100 ends with the Typo Tyrant, the game's namesake; beating it unlocks the Phoenix Feather for Survival games.
  */
 import { DIFFICULTIES } from "./config";
 
@@ -12,8 +12,9 @@ export const TOWER = {
   maxLives: 3, // Extra Life power-ups can't take you past this
   wordsPerFloor: 3,
   bannerMs: 1100, // floor banners are quicker than Survival's round banners (there are 100 of them)
-  finalBossHp: 6,
-  finalBossName: "The Summit Warden",
+  finalBossHp: 6, // health blocks
+  finalBossArmor: 2, // words it takes to break one block (the armored health bar)
+  finalBossName: "The Typo Tyrant", // the game's namesake waits at the top (never a random boss)
   difficulty: DIFFICULTIES.medium,
 };
 

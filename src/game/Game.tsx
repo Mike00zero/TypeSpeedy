@@ -25,6 +25,10 @@ import { StatusBar } from "expo-status-bar";
 import * as Haptics from "expo-haptics";
 import { buzz, setHapticsEnabled } from "./haptics";
 import appConfig from "../../app.json";
+import { EMPTY_TRIALS, PRO, isProMode, spendTrial, trialsLeft, type ProTrials } from "./pro";
+import { PURCHASES_TEST_MODE, buyPro, checkProOwned, getProPrice, restorePro } from "./purchases";
+import { EMPTY_REVIEW, askForReview, shouldAskForReview, type ReviewState } from "./review";
+import { DEFAULT_REMINDER_HOUR, REMINDER_TIMES, allowReminders, cancelReminders, scheduleReminders } from "./reminders";
 import {
   EMPTY_TOWER,
   PHOENIX,
@@ -34,7 +38,28 @@ import {
   towerTier,
   type TowerProgress,
 } from "./tower";
-import { EMPTY_SPRINT, MODES, MODE_BY_ID, SPRINT, wpm, type GameMode, type SprintBest } from "./modes";
+import {
+  EMPTY_MIX,
+  MIX,
+  MIX_TWISTS,
+  pickTwist,
+  type MixBest,
+  type MixTwistId,
+  EMPTY_RUSH,
+  EMPTY_SPRINT,
+  EMPTY_ZEN,
+  MODES,
+  MODE_BY_ID,
+  RUSH,
+  SPRINT,
+  SUDDEN,
+  ZEN,
+  wpm,
+  type GameMode,
+  type RushBest,
+  type SprintBest,
+  type ZenBest,
+} from "./modes";
 
 import {
   CONFIG,
@@ -51,7 +76,7 @@ import {
   type DifficultyId,
 } from "./config";
 import { pickWord } from "./words";
-import { bossPalette, fonts, usePalette, type Palette } from "./theme";
+import { bossPalette, courtFonts, fonts, getLook, setLook, usePalette, withAlpha, type Look, type Palette } from "./theme";
 import {
   PACK_BY_ID,
   THEMES,
@@ -60,6 +85,7 @@ import {
   newUnlockables,
   requirementText,
   themePalette,
+  themeName,
   type PackId,
   type Theme,
   type ThemeId,
@@ -70,6 +96,12 @@ import {
   loadAchievements,
   loadDaily,
   loadSprint,
+  loadZen,
+  loadRush,
+  loadSudden,
+  loadMix,
+  loadPro,
+  loadExtras,
   loadTower,
   loadPrefs,
   saveAchievements,
@@ -83,7 +115,17 @@ import {
   saveEffects,
   saveHaptics,
   saveMode,
+  saveLook,
   saveSprint,
+  saveZen,
+  saveRush,
+  saveSudden,
+  saveMix,
+  savePro,
+  saveReview,
+  saveReminder,
+  type ReminderPrefs,
+  saveTrials,
   saveTower,
   saveMusic,
   saveMuted,
@@ -94,6 +136,8 @@ import {
   type DailyStreak,
 } from "./storage";
 import { useKeyboardHeight } from "./useKeyboardHeight";
+import { CourtMenu, PauseIcon, ShieldIcon, type CourtMenuProps } from "./court";
+import { LinearGradient } from "expo-linear-gradient";
 import {
   BONUS,
   BONUS_POWERUPS,
@@ -193,6 +237,9 @@ type GameState = {
   perfectRounds: number;
   roundMisses: number; // wrong letters + timeouts this round (boss included)
   bossMisses: number; // wrong letters + timeouts in this boss fight
+  bossArmor: number; // words to break one health block (2 for the Typo Tyrant, else 1)
+  bossChip: number; // words landed on the current block so far
+  bossRegen: boolean; // the boss heals a block when a word times out (the Typo Tyrant)
   newAchievements: string[]; // names unlocked this game, for the game-over screen
   newUnlocks: string[]; // themes and word packs unlocked this game
   pack: string[] | null; // this game's word pack (null = the standard list)
@@ -206,8 +253,17 @@ type GameState = {
   wordShownAt: number;
   pausedAt: number;
   lettersTyped: number; // letters in finished words, for words per minute
+  // Marathon Mix
+  twist: MixTwistId | null; // this round's twist
+  twistHistory: MixTwistId[];
+  twistCardId: number; // bumps when the twist card closes, so its timer can't start the round twice
+  giantBosses: number;
+  roundLog: number[]; // wrong letters + timeouts in each cleared round (for the Daily share grid)
   careerSaved: boolean; // this game's totals were added to the lifetime stats
 };
+
+/** The play area never gets wider than this (iPad); the rest is background. */
+const MAX_PLAY_WIDTH = 640;
 
 const MAX_LIVES = Math.max(...DIFFICULTY_ORDER.map(id => DIFFICULTIES[id].lives));
 
@@ -267,6 +323,9 @@ function freshState(d: Difficulty): GameState {
     perfectRounds: 0,
     roundMisses: 0,
     bossMisses: 0,
+    bossArmor: 1,
+    bossChip: 0,
+    bossRegen: false,
     newAchievements: [],
     newUnlocks: [],
     pack: null,
@@ -279,6 +338,11 @@ function freshState(d: Difficulty): GameState {
     wordShownAt: 0,
     pausedAt: 0,
     lettersTyped: 0,
+    twist: null,
+    twistHistory: [],
+    twistCardId: 0,
+    giantBosses: 0,
+    roundLog: [],
     careerSaved: true, // nothing to save until a game starts
   };
 }
@@ -297,12 +361,39 @@ export default function Game() {
   const [sprintBest, setSprintBest] = useState<SprintBest>(EMPTY_SPRINT);
   const sprintBestRef = useRef<SprintBest>(EMPTY_SPRINT);
   const [showModes, setShowModes] = useState(false);
+  const [zenBest, setZenBest] = useState<ZenBest>(EMPTY_ZEN);
+  const zenBestRef = useRef<ZenBest>(EMPTY_ZEN);
+  const [rushBest, setRushBest] = useState<RushBest>(EMPTY_RUSH);
+  const rushBestRef = useRef<RushBest>(EMPTY_RUSH);
+  const [suddenBest, setSuddenBest] = useState<BestScores>({ easy: 0, medium: 0, hard: 0, impossible: 0 });
+  const suddenBestRef = useRef<BestScores>(suddenBest);
+  const [mixBest, setMixBest] = useState<MixBest>(EMPTY_MIX);
+  const mixBestRef = useRef<MixBest>(EMPTY_MIX);
   const [showSettings, setShowSettings] = useState(false);
   const [confirmReset, setConfirmReset] = useState<"stats" | "achievements" | null>(null);
   const [hapticsOn, setHapticsOn] = useState(true);
   const [effectsOn, setEffectsOn] = useState(true);
   const effectsRef = useRef(true); // read by hitEffects(), which can run from an old render's timer
-  const { c: baseColors, dark: isDark } = themePalette(themeId, systemDark);
+  const [pro, setPro] = useState(false);
+  const proRef = useRef(false);
+  const [trials, setTrials] = useState<ProTrials>(EMPTY_TRIALS);
+  const trialsRef = useRef<ProTrials>(EMPTY_TRIALS);
+  const [showPaywall, setShowPaywall] = useState(false);
+  const [paywallMsg, setPaywallMsg] = useState("");
+  const [paywallBusy, setPaywallBusy] = useState(false);
+  const [proPrice, setProPrice] = useState(PRO.fallbackPrice);
+  const reviewRef = useRef<ReviewState>(EMPTY_REVIEW);
+  const [reminder, setReminder] = useState<ReminderPrefs>({ on: false, hour: DEFAULT_REMINDER_HOUR, asked: false });
+  const reminderRef = useRef<ReminderPrefs>(reminder);
+  // Themes other than Classic need Pro to use (they still unlock through achievements).
+  // The overall look (Royal Court by default, or the original Modern design). Set before any styles are made.
+  const [look, setLookState] = useState<Look>("court");
+  setLook(look);
+  // Developer builds only: try every theme and word pack without earning them or buying Pro.
+  const [devUnlockAll, setDevUnlockAll] = useState(false);
+  const devUnlockRef = useRef(false);
+  const canStyle = pro || devUnlockAll; // may use non-Classic themes and packs
+  const { c: baseColors, dark: isDark } = themePalette(canStyle ? themeId : "classic", systemDark);
   const insets = useSafeAreaInsets();
   const kbHeight = useKeyboardHeight();
   const { width } = useWindowDimensions();
@@ -361,11 +452,52 @@ export default function Game() {
   const pulse = useRef(new Animated.Value(1)).current;
   const overlayPop = useRef(new Animated.Value(1)).current;
   const comboPop = useRef(new Animated.Value(1)).current;
+  const twistTimer = useRef(new Animated.Value(1)).current; // Marathon Mix: the twist card's countdown bar
   const pips = useRef(Array.from({ length: MAX_LIVES }, () => new Animated.Value(1))).current;
 
   /* ---------- setup ---------- */
   useEffect(() => {
     initSounds();
+    loadPro()
+      .then(p => {
+        proRef.current = p.pro;
+        setPro(p.pro);
+        trialsRef.current = p.trials;
+        setTrials(p.trials);
+        // Then ask the App Store (via RevenueCat) and follow it: picks up purchases made on another
+        // device and refunds. Unknown (offline, no store) keeps the saved status.
+        return checkProOwned();
+      })
+      .then(owned => {
+        if (owned === null || owned === proRef.current) return;
+        proRef.current = owned;
+        setPro(owned);
+        savePro(owned);
+      });
+    getProPrice().then(price => price && setProPrice(price));
+    Promise.all([loadExtras(), loadDaily()]).then(([x, d]) => {
+      reviewRef.current = x.review;
+      reminderRef.current = x.reminder;
+      setReminder(x.reminder);
+      // Refresh the week of reminders on every launch (so they never run out).
+      if (x.reminder.on) scheduleReminders(x.reminder.hour, d.record?.date === todayKey(), d.streak.count);
+    });
+    loadMix().then(b => {
+      mixBestRef.current = b;
+      setMixBest(b);
+    });
+    loadSudden().then(b => {
+      suddenBestRef.current = b;
+      setSuddenBest(b);
+    });
+    loadRush().then(b => {
+      rushBestRef.current = b;
+      setRushBest(b);
+    });
+    loadZen().then(b => {
+      zenBestRef.current = b;
+      setZenBest(b);
+    });
     loadSprint().then(b => {
       sprintBestRef.current = b;
       setSprintBest(b);
@@ -392,6 +524,7 @@ export default function Game() {
       setMuted(p.muted);
       setMusicOnState(p.music);
       setMusicEnabled(p.music);
+      setLookState(p.look);
       setModeState(p.mode);
       modeRef.current = p.mode;
       setHapticsOn(p.haptics);
@@ -505,6 +638,9 @@ export default function Game() {
       startFloor: G.startFloor,
       floorCleared: G.floorCleared,
       towerTop: G.towerTop,
+      giantBosses: G.giantBosses,
+      twistsSeen: new Set(G.twistHistory.filter(t => t !== "warmup")).size,
+      wpm: G.mode === "sprint" ? wpm(G.lettersTyped, sprintSeconds()) : G.mode === "zen" ? zenWpm() : 0,
     };
   };
 
@@ -594,9 +730,25 @@ export default function Game() {
   /* ---------- modes ---------- */
   const inTower = () => G.mode === "tower";
   const inSprint = () => G.mode === "sprint";
+  const inZen = () => G.mode === "zen";
+  const inRush = () => G.mode === "rush";
+  const inSudden = () => G.mode === "sudden";
+  const inMix = () => G.mode === "mix";
+  /** Marathon Mix: this round's twist (null in other modes). */
+  const twist = () => (inMix() && G.twist ? MIX_TWISTS[G.twist] : null);
+  /** Zen: time spent on words (pauses don't count), including the word on screen now. */
+  const zenSeconds = () => G.typingSeconds + (G.phase === "playing" ? (Date.now() - G.wordShownAt) / 1000 : 0);
+  const zenWpm = () => wpm(G.lettersTyped, zenSeconds());
+
+  /** Zen: the Finish button ends the session and shows the summary. */
+  const finishZen = () => {
+    if (!inZen() || G.phase === "over" || G.phase === "title") return;
+    if (G.phase === "paused") G.phase = "between";
+    gameOver();
+  };
   /** The Survival round that sets the clock and word lengths (a Tower floor maps onto one). */
   const tier = () => (inTower() ? towerTier(G.round) : G.round);
-  const maxLives = () => (inTower() ? TOWER.maxLives : MAX_LIVES);
+  const maxLives = () => (inTower() ? TOWER.maxLives : inRush() ? RUSH.maxLives : inSudden() ? 1 : MAX_LIVES);
 
   const chooseMode = (m: GameMode) => {
     modeRef.current = m;
@@ -678,13 +830,30 @@ export default function Game() {
     bump();
   };
 
-  const startGame = (daily = false) => {
+  /** `devFloor`: developer shortcut, start a climb on this floor (see Settings > Developer). */
+  const startGame = (daily = false, devFloor?: number) => {
     if (daily && dailyRecord?.date === todayKey()) return; // one try per day
+    // Pro modes: free players get one try per mode per day.
+    if (!daily && isProMode(modeRef.current) && !proRef.current && devFloor === undefined) {
+      const today = todayKey();
+      if (trialsLeft(trialsRef.current, modeRef.current, today) <= 0) {
+        if (G.phase === "over") toTitle();
+        openPaywall();
+        return;
+      }
+      trialsRef.current = spendTrial(trialsRef.current, modeRef.current, today);
+      setTrials(trialsRef.current);
+      saveTrials(trialsRef.current);
+    }
     saveCareer(); // "Play again" straight from game over
     timers.current.forEach(clearTimeout);
     timers.current = [];
     const climbing = !daily && modeRef.current === "tower";
     const sprinting = !daily && modeRef.current === "sprint";
+    const zenning = !daily && modeRef.current === "zen";
+    const rushing = !daily && modeRef.current === "rush";
+    const suddenDeath = !daily && modeRef.current === "sudden";
+    const mixing = !daily && modeRef.current === "mix";
     Object.assign(
       G,
       freshState(
@@ -694,22 +863,39 @@ export default function Game() {
             ? TOWER.difficulty
             : sprinting
               ? SPRINT.difficulty
-              : DIFFICULTIES[difficultyRef.current],
+              : zenning
+                ? ZEN.difficulty
+                : rushing
+                  ? RUSH.difficulty
+                  : mixing
+                    ? MIX.difficulty
+                    : DIFFICULTIES[difficultyRef.current],
       ),
     );
     G.careerSaved = false;
     if (sprinting) {
       G.mode = "sprint";
+    } else if (zenning) {
+      G.mode = "zen";
+    } else if (rushing) {
+      G.mode = "rush";
+      G.lives = RUSH.lives;
+    } else if (mixing) {
+      G.mode = "mix";
+    } else if (suddenDeath) {
+      G.mode = "sudden"; // the chosen difficulty, but only one life (and no Phoenix Feather)
+      G.lives = 1;
     } else if (climbing) {
       G.mode = "tower";
       G.lives = TOWER.lives;
-      G.round = towerRef.current.checkpoint + 1; // start at the last checkpoint
+      G.round = devFloor ?? towerRef.current.checkpoint + 1; // start at the last checkpoint
       G.startFloor = G.round;
       updateTower({ ...towerRef.current, climbs: towerRef.current.climbs + 1 });
     } else if (!daily && towerRef.current.cleared) {
       G.phoenix = true; // the Tower reward (not in the Daily, so everyone plays it the same)
     }
-    G.pack = daily ? null : PACK_BY_ID[packRef.current].words; // the Daily always uses the standard words
+    // The Daily always uses the standard words; other packs need Pro.
+    G.pack = daily || !(proRef.current || devUnlockRef.current) ? null : PACK_BY_ID[packRef.current].words;
     if (daily) {
       const today = todayKey();
       G.daily = true;
@@ -726,6 +912,7 @@ export default function Game() {
       setDailyStreak(streak);
       saveDailyStreak(streak);
       dailyStreakRef.current = streak.count;
+      if (reminderRef.current.on) scheduleReminders(reminderRef.current.hour, true, streak.count); // no reminder today
     } else {
       rng.current = freeStreams();
     }
@@ -739,8 +926,22 @@ export default function Game() {
 
   const startRound = () => {
     G.phase = "banner";
-    G.limit = inSprint() ? SPRINT.seconds : timeForRound(tier(), G.d);
+    if (inMix()) {
+      G.twist = G.round === 1 ? "warmup" : pickTwist(G.twistHistory, rng.current.bosses);
+      G.twistHistory.push(G.twist);
+      const free = MIX_TWISTS[G.twist].startShields ?? 0;
+      if (free) G.shields += free;
+    }
+    G.limit = inSprint() ? SPRINT.seconds : timeForRound(tier(), G.d) * (twist()?.timeFactor ?? 1);
     if (inSprint()) G.wordLimit = SPRINT.seconds;
+    if (inZen()) G.limit = G.wordLimit = Infinity; // no clock
+    if (inRush()) {
+      // No normal words: straight into the next boss.
+      G.wordInRound = 0;
+      G.roundMisses = 0;
+      checkAchievements();
+      return startBoss();
+    }
     G.wordInRound = 0;
     G.roundMisses = 0;
     G.word = "";
@@ -752,11 +953,49 @@ export default function Game() {
     checkAchievements(); // reaching a round (and the Daily ones on the first)
     playMusic("main"); // keeps going if it's already on; restarts after a boss
     bump();
-    later(nextWord, inTower() && !isCheckpointFloor(G.round) ? TOWER.bannerMs : 1700);
+    if (inMix()) {
+      // Marathon Mix: a card explains the round's twist. It closes on its own, or on a tap.
+      const id = G.twistCardId;
+      twistTimer.setValue(1);
+      Animated.timing(twistTimer, { toValue: 0, duration: MIX.cardMs, easing: Easing.linear, useNativeDriver: true }).start();
+      later(() => closeTwistCard(id), MIX.cardMs);
+      return;
+    }
+    later(nextWord, inTower() && !isCheckpointFloor(G.round) ? TOWER.bannerMs : inZen() ? 1400 : 1700);
+  };
+
+  /** This word's clock: the round's, shortened word by word under Shrinking Clock. */
+  const wordClock = () => {
+    const shrink = twist()?.shrinkPerWord;
+    return shrink ? G.limit * Math.max(0.4, 1 - shrink * G.wordInRound) : G.limit;
+  };
+
+  /** A random power-up into the bucket (if there's room). Returns whether it fit. */
+  const givePowerUp = (why: string) => {
+    if (G.inventory.length >= REWARDS.bucketSize) return false;
+    const id = rollPowerUp(rng.current.powerups, inSudden() ? ["life"] : []); // no extra lives in Sudden Death
+    G.inventory.push(id);
+    if (G.inventory.length >= REWARDS.bucketSize) G.bucketFilled = true;
+    later(() => addFloat(`${why}: ${POWERUPS[id].name}`, "reward"), 280);
+    buzz.notify(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    return true;
+  };
+
+  /** Marathon Mix: close the twist card and start the round (once, whether by tap or timer). */
+  const closeTwistCard = (id = G.twistCardId) => {
+    if (!inMix() || id !== G.twistCardId || G.phase !== "banner" || G.inBoss) return;
+    G.twistCardId++;
+    twistTimer.stopAnimation();
+    focusInput();
+    nextWord();
   };
 
   const nextWord = () => {
-    const range = inSprint() ? SPRINT.lengths : G.d.lengths(tier());
+    const range = inSprint()
+      ? SPRINT.lengths
+      : inZen()
+        ? ZEN.lengths
+        : (twist()?.lengths ?? G.d.lengths(tier()));
     G.word = pickWord(
       G.inBoss ? bossRange(range) : range,
       G.recent,
@@ -766,6 +1005,14 @@ export default function Game() {
     );
     G.recent.push(G.word);
     if (G.recent.length > 40) G.recent.shift();
+    if (twist()?.backwards) G.word = [...G.word].reverse().join("");
+    if (twist()?.scramble) G.word = scrambleWord(G.word, rng.current.words);
+    if (twist()?.vanish) {
+      const id = G.wordId + 1; // this word's id (bumped just below)
+      later(() => {
+        if (G.wordId === id) bump(); // redraw so the letters hide
+      }, MIX.vanishMs);
+    }
     G.pos = 0;
     G.wordMisses = 0;
     G.missed = new Set();
@@ -773,6 +1020,14 @@ export default function Game() {
     G.look = "normal";
     G.wordId++;
     G.wordShownAt = Date.now();
+    if (inZen()) {
+      // No clock at all: the word waits for you.
+      G.wordStart = G.wordShownAt;
+      G.phase = "playing";
+      resetInput();
+      bump();
+      return;
+    }
     if (inSprint()) {
       // One clock for the whole Sprint, started by the first word.
       G.phase = "playing";
@@ -788,9 +1043,9 @@ export default function Game() {
     G.wordStart = Date.now();
     G.frozen = false;
     if (G.slowWords > 0) {
-      G.wordLimit = G.limit * REWARDS.slowFactor;
+      G.wordLimit = wordClock() * REWARDS.slowFactor;
       G.slowWords--;
-    } else G.wordLimit = G.limit;
+    } else G.wordLimit = wordClock();
     G.phase = "playing";
     resetInput();
     runClock(1);
@@ -799,7 +1054,7 @@ export default function Game() {
 
   const advance = () => {
     if (G.phase === "over") return;
-    if (inSprint()) return nextWord();
+    if (inSprint() || inZen()) return nextWord();
     if (G.lives <= 0 && !tryPhoenix()) return gameOver();
     if (G.inBoss) {
       if (G.bossHp <= 0) bossDefeated();
@@ -819,9 +1074,12 @@ export default function Game() {
   const startBoss = () => {
     const finalBoss = inTower() && G.round === TOWER.floors;
     G.inBoss = true;
-    G.bossMaxHp = finalBoss ? TOWER.finalBossHp : bossHp(tier());
+    G.bossMaxHp = finalBoss ? TOWER.finalBossHp : bossHp(tier()) * (twist()?.bossHpFactor ?? 1);
     G.bossHp = G.bossMaxHp;
     G.bossMisses = 0;
+    G.bossArmor = finalBoss ? TOWER.finalBossArmor : 1;
+    G.bossChip = 0;
+    G.bossRegen = finalBoss;
     G.bossName = finalBoss ? TOWER.finalBossName : pickBossName(G.bossHistory, rng.current.bosses);
     G.bossHistory.push(G.bossName);
     G.phase = "banner";
@@ -833,11 +1091,12 @@ export default function Game() {
     playMusic("boss");
     buzz.notify(Haptics.NotificationFeedbackType.Warning).catch(() => {});
     bump();
-    later(nextWord, BOSS.introMs);
+    later(nextWord, inRush() ? RUSH.introMs : BOSS.introMs);
   };
 
   const nextRound = () => {
     if (G.roundMisses === 0) G.perfectRounds++;
+    G.roundLog.push(G.roundMisses);
     if (inTower()) {
       G.floorCleared = G.round;
       if (G.round >= TOWER.floors) return towerComplete();
@@ -855,18 +1114,20 @@ export default function Game() {
     G.bossesDefeated++;
     if (G.bossMisses === 0) G.flawlessBosses++;
     if (G.lives === 1 && G.d.lives > 1) G.clutchBosses++;
-    const pts = BOSS.bonusPointsPerRound * tier();
+    const pts =
+      BOSS.bonusPointsPerRound * tier() * (inSudden() ? SUDDEN.multiplier : 1) * (twist()?.bossHpFactor ?? 1);
+    if (twist()?.id === "giant") G.giantBosses++;
     G.score += pts;
     addFloat(`${G.bossName} defeated! +${pts}`, "reward");
     playVictory(); // stops the boss music and plays the fanfare
     buzz.notify(Haptics.NotificationFeedbackType.Success).catch(() => {});
     checkRewards();
     checkAchievements();
-    const won = rollBonus(G.bonus, rng.current.bonus);
+    const won = rollBonus(G.bonus, rng.current.bonus, inSudden() ? ["megaLife"] : []);
     if (!G.bonus) {
       G.bonus = won;
       later(() => addFloat(`Bonus power-up: ${BONUS_POWERUPS[won].name}`, "reward"), 700);
-      later(nextRound, 2600); // let the victory fanfare finish first
+      later(nextRound, inRush() ? RUSH.breatherMs : 2600); // let the victory fanfare finish first
     } else {
       // Only one bonus can be held: ask whether to keep it or take the new one.
       G.pendingBonus = won;
@@ -923,6 +1184,11 @@ export default function Game() {
         bump();
         return;
       }
+      if (inZen()) {
+        buzz.impact(Haptics.ImpactFeedbackStyle.Light).catch(() => {}); // a gentle nudge, no penalty
+        bump();
+        return;
+      }
       if (G.shields > 0) {
         G.shields--;
         G.shieldBlocks++;
@@ -932,8 +1198,9 @@ export default function Game() {
         bump();
         return;
       }
-      addFloat(G.lives === 1 ? "Miss" : "−1 life", "bad", G.pos);
-      loseLife(1);
+      const cost = twist()?.missCost ?? 1;
+      addFloat(G.lives <= cost ? "Miss" : `−${cost} li${cost === 1 ? "fe" : "ves"}`, "bad", G.pos);
+      loseLife(cost);
       if (G.lives <= 0 && !tryPhoenix()) {
         G.phase = "between";
         fuse.stopAnimation();
@@ -945,7 +1212,7 @@ export default function Game() {
 
   /** `auto`: finished by Auto-Type, so it doesn't count as a fast word. */
   const solved = (auto = false) => {
-    const used = (Date.now() - (inSprint() ? G.wordShownAt : G.wordStart)) / 1000;
+    const used = (Date.now() - (inSprint() || inZen() ? G.wordShownAt : G.wordStart)) / 1000;
     G.typingSeconds += Math.min(used, G.wordLimit);
     G.lettersTyped += G.word.length;
     let pts = inSprint()
@@ -972,10 +1239,28 @@ export default function Game() {
       comboPop.setValue(1.5);
       Animated.spring(comboPop, { toValue: 1, friction: 4, useNativeDriver: true }).start();
     }
-    pts = Math.round(pts * mult * combo);
+    if (inSudden()) mult *= SUDDEN.multiplier;
+    mult *= twist()?.pointsFactor ?? 1;
+    pts = inZen() ? 0 : Math.round(pts * mult * combo); // Zen keeps no score
     G.score += pts;
-    if (G.inBoss) G.bossHp = Math.max(0, G.bossHp - 1);
+    let cracked = false; // an armored block took a hit but didn't break
+    if (G.inBoss) {
+      G.bossChip++;
+      if (G.bossChip >= G.bossArmor) {
+        G.bossChip = 0;
+        G.bossHp = Math.max(0, G.bossHp - 1);
+      } else cracked = true;
+    }
     G.wordsTyped++;
+    const tw = twist();
+    if (tw?.healOnFlawless && G.wordMisses === 0 && G.lives < maxLives()) {
+      G.lives++;
+      const p = pips[G.lives - 1];
+      p.setValue(1.8);
+      Animated.spring(p, { toValue: 1, friction: 4, useNativeDriver: true }).start();
+      later(() => addFloat("+1 life", "reward"), 450);
+    }
+    if (tw?.powerUpEvery && !G.inBoss && (G.wordInRound + 1) % tw.powerUpEvery === 0) givePowerUp("Power Surge");
     if (!auto) {
       if (!G.fastest || used < G.fastest.t) G.fastest = { t: used, w: G.word };
       if (G.word.length >= 7 && (G.fastestLong === null || used < G.fastestLong)) G.fastestLong = used;
@@ -984,12 +1269,13 @@ export default function Game() {
     G.phase = "between";
     G.look = "solved";
     if (!inSprint()) fuse.stopAnimation(); // the Sprint clock keeps running
-    const hit = G.inBoss ? (G.bossHp > 0 ? " · hit!" : " · final blow!") : "";
+    const hit = G.inBoss ? (cracked ? " · armor cracked" : G.bossHp > 0 ? " · hit!" : " · final blow!") : "";
     const tags = [mult > 1 ? `${mult}×` : "", combo > 1 ? `combo ×${combo}` : ""].filter(Boolean).join(", ");
-    addFloat(`+${pts}${tags ? ` (${tags})` : ""}${G.wordMisses === 0 && !hit && !tags ? " flawless" : ""}${hit}`, "good");
+    if (inZen()) addFloat(`${used.toFixed(2)}s${G.wordMisses === 0 ? " · clean" : ""}`, "good");
+    else addFloat(`+${pts}${tags ? ` (${tags})` : ""}${G.wordMisses === 0 && !hit && !tags ? " flawless" : ""}${hit}`, "good");
     play("word");
     buzz.impact(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
-    if (!inSprint()) checkRewards(); // no power-ups in a Sprint
+    if (!inSprint() && !inZen()) checkRewards(); // no power-ups in Sprint or Zen
     checkAchievements();
     bump();
     later(advance, inSprint() ? 140 : 260);
@@ -1010,8 +1296,19 @@ export default function Game() {
       checkAchievements();
       addFloat("Too slow · shield blocked it", "reward");
     } else {
-      addFloat(G.lives === 1 ? "Too slow" : `Too slow · −${CONFIG.timeoutCost} life`, "bad");
-      loseLife(CONFIG.timeoutCost);
+      const cost = CONFIG.timeoutCost * (twist()?.missCost ?? 1);
+      addFloat(G.lives <= cost ? "Too slow" : `Too slow · −${cost} li${cost === 1 ? "fe" : "ves"}`, "bad");
+      loseLife(cost);
+    }
+    // The Typo Tyrant feeds on slowness: a timeout repairs its armor, or regrows a block.
+    if (G.inBoss && G.bossRegen) {
+      if (G.bossChip > 0) {
+        G.bossChip = 0;
+        later(() => addFloat(`${G.bossName} repairs its armor!`, "bad"), 300);
+      } else if (G.bossHp < G.bossMaxHp) {
+        G.bossHp++;
+        later(() => addFloat(`${G.bossName} regenerates! +1 block`, "bad"), 300);
+      }
     }
     bump();
     later(advance, 650);
@@ -1022,14 +1319,29 @@ export default function Game() {
     G.phase = "over";
     fuse.stopAnimation();
     if (G.towerTop) playVictory();
-    else {
+    else if (inZen()) {
+      playMusic(null);
+      play("round"); // a calm chime, not the game-over sound
+    } else {
       playMusic(null);
       play("over");
     }
-    setIsNewBest(recordBest() && G.score > 0);
+    const newBest = recordBest() && G.score > 0;
+    setIsNewBest(newBest);
+    if (G.daily) G.roundLog.push(-1); // the round you fell in, for the share grid
     recordDaily();
     checkAchievements(); // end-of-game ones, like Sharpshooter
     saveCareer();
+    // A good moment to ask for a rating: a new best or the Tower summit (never after a plain loss).
+    if ((newBest || G.towerTop) && shouldAskForReview(reviewRef.current, lifetimeRef.current.games)) {
+      later(async () => {
+        if (G.phase !== "over") return;
+        if (await askForReview()) {
+          reviewRef.current = { asks: reviewRef.current.asks + 1, last: Date.now() };
+          saveReview(reviewRef.current);
+        }
+      }, 1800);
+    }
     if (G.newAchievements.length) later(() => play("achieve"), 900); // after the game-over sound
     Keyboard.dismiss();
     popOverlay();
@@ -1039,6 +1351,43 @@ export default function Game() {
   /** Saves the score as this difficulty's best if it beats it. Returns whether it did. */
   const recordBest = () => {
     if (inTower()) return false; // Tower scores aren't Survival bests
+    if (inMix()) {
+      const b = mixBestRef.current;
+      const next = { score: Math.max(b.score, G.score), round: Math.max(b.round, G.round) };
+      if (next.score !== b.score || next.round !== b.round) {
+        mixBestRef.current = next;
+        setMixBest(next);
+        saveMix(next);
+      }
+      return G.score > b.score;
+    }
+    if (inSudden()) {
+      const id = G.d.id;
+      if (G.score <= suddenBestRef.current[id]) return false;
+      suddenBestRef.current = { ...suddenBestRef.current, [id]: G.score };
+      setSuddenBest(suddenBestRef.current);
+      saveSudden(suddenBestRef.current);
+      return true;
+    }
+    if (inRush()) {
+      const b = rushBestRef.current;
+      const next = { bosses: Math.max(b.bosses, G.bossesDefeated), score: Math.max(b.score, G.score) };
+      if (next.bosses !== b.bosses || next.score !== b.score) {
+        rushBestRef.current = next;
+        setRushBest(next);
+        saveRush(next);
+      }
+      return G.bossesDefeated > b.bosses || (G.bossesDefeated === b.bosses && G.score > b.score);
+    }
+    if (inZen()) {
+      const b = zenBestRef.current;
+      const speed = G.wordsTyped >= ZEN.minWordsForBest ? zenWpm() : 0;
+      const next = { words: Math.max(b.words, G.wordsTyped), wpm: Math.max(b.wpm, speed), sessions: b.sessions + 1 };
+      zenBestRef.current = next;
+      setZenBest(next);
+      saveZen(next);
+      return speed > b.wpm;
+    }
     if (inSprint()) {
       const b = sprintBestRef.current;
       const words = G.wordsTyped;
@@ -1069,13 +1418,28 @@ export default function Game() {
   };
 
   const shareDaily = () => {
-    const streak = dailyStreak.count > 1 ? ` (${dailyStreak.count}-day streak)` : "";
-    Share.share({
-      message:
-        `TypeSpeedy Daily Challenge · ${prettyDate(G.dailyDate)}\n` +
-        `${G.score.toLocaleString()} points · reached round ${G.round} · ${G.bossesDefeated} boss${G.bossesDefeated === 1 ? "" : "es"} beaten${streak}\n` +
-        `Same words for everyone today. Can you beat it?`,
-    }).catch(() => {});
+    const accuracyPct = G.keys ? Math.round((G.goodKeys / G.keys) * 100) : 100;
+    const lines = [
+      `Typo Tyrant Daily · ${prettyDate(G.dailyDate)}`,
+      `Round ${G.round} · ${G.bossesDefeated} boss${G.bossesDefeated === 1 ? "" : "es"} · ${G.score.toLocaleString()} pts · ${accuracyPct}%`,
+      dailyGrid(G.roundLog),
+      dailyStreak.count > 1 ? `🔥 ${dailyStreak.count}-day streak` : "",
+      "Same words for everyone today. Can you beat me?",
+    ];
+    Share.share({ message: lines.filter(Boolean).join("\n") }).catch(() => {});
+  };
+
+  /* ---------- Daily reminder ---------- */
+  const updateReminder = async (next: ReminderPrefs) => {
+    if (next.on && !reminderRef.current.on && !(await allowReminders())) {
+      next = { ...next, on: false }; // permission denied
+      addFloat("Turn on notifications in your phone's Settings", "bad");
+    }
+    reminderRef.current = next;
+    setReminder(next);
+    saveReminder(next);
+    if (next.on) scheduleReminders(next.hour, dailyRecord?.date === todayKey(), dailyStreakRef.current);
+    else cancelReminders();
   };
 
   const quitToMenu = () => {
@@ -1113,13 +1477,13 @@ export default function Game() {
   const resume = () => {
     if (G.phase !== "paused") return;
     const elapsedFrac = 1 - G.pausedRemaining;
-    G.wordStart = Date.now() - elapsedFrac * G.wordLimit * 1000;
+    if (!inZen()) G.wordStart = Date.now() - elapsedFrac * G.wordLimit * 1000;
     G.frozen = false; // pausing uses up what was left of a Freeze
     G.wordShownAt += Date.now() - G.pausedAt; // don't count the pause against this word's time
     G.phase = "playing";
     resumeMusic();
     focusInput();
-    runClock(G.pausedRemaining);
+    if (!inZen()) runClock(G.pausedRemaining);
     bump();
   };
 
@@ -1128,15 +1492,7 @@ export default function Game() {
     while (G.score >= G.nextRewardAt) {
       G.rewardsEarned++;
       G.nextRewardAt = rewardThreshold(G.rewardsEarned);
-      if (G.inventory.length < REWARDS.bucketSize) {
-        const id = rollPowerUp(rng.current.powerups);
-        G.inventory.push(id);
-        if (G.inventory.length >= REWARDS.bucketSize) G.bucketFilled = true;
-        later(() => addFloat(`New power-up: ${POWERUPS[id].name}`, "reward"), 280);
-        buzz.notify(Haptics.NotificationFeedbackType.Success).catch(() => {});
-      } else {
-        later(() => addFloat("Bucket full · reward lost", "bad"), 280);
-      }
+      if (!givePowerUp("New power-up")) later(() => addFloat("Bucket full · reward lost", "bad"), 280);
     }
     if (G.bucketFilled) checkAchievements();
   };
@@ -1232,6 +1588,10 @@ export default function Game() {
 
   const activateBonus = () => {
     if (G.phase !== "playing" || !G.bonus) return;
+    if (twist()?.lockPowerUps) {
+      addFloat("Power-ups are locked this round", "bad");
+      return;
+    }
     const id = G.bonus;
     const blocked = applyBonus(id);
     if (blocked) {
@@ -1290,6 +1650,10 @@ export default function Game() {
     if (G.phase !== "playing") return;
     const id = G.inventory[slot];
     if (!id) return;
+    if (twist()?.lockPowerUps) {
+      addFloat("Power-ups are locked this round", "bad");
+      return;
+    }
     const blocked = applyPowerUp(id);
     if (blocked) {
       addFloat(blocked, "bad");
@@ -1313,17 +1677,72 @@ export default function Game() {
   };
 
   const chooseTheme = (t: Theme) => {
-    if (!meetsRequirement(t.requires, unlockedRef.current)) return;
+    if (!devUnlockRef.current) {
+      if (!meetsRequirement(t.requires, unlockedRef.current)) return;
+      if (t.id !== "classic" && !proRef.current) return openPaywall();
+    }
     setThemeId(t.id);
     saveTheme(t.id);
     buzz.select().catch(() => {});
   };
 
   const choosePack = (p: WordPack) => {
-    if (!meetsRequirement(p.requires, unlockedRef.current)) return;
+    if (!devUnlockRef.current) {
+      if (!meetsRequirement(p.requires, unlockedRef.current)) return;
+      if (p.id !== "classic" && !proRef.current) return openPaywall();
+    }
     setPackId(p.id);
     packRef.current = p.id;
     savePack(p.id);
+    buzz.select().catch(() => {});
+  };
+
+  /* ---------- Pro ---------- */
+  const openPaywall = () => {
+    setPaywallMsg("");
+    setShowPaywall(true);
+    Keyboard.dismiss();
+  };
+
+  const setProOwned = (on: boolean) => {
+    proRef.current = on;
+    setPro(on);
+    savePro(on);
+  };
+
+  const purchasePro = async () => {
+    if (paywallBusy) return;
+    setPaywallBusy(true);
+    setPaywallMsg("");
+    const r = await buyPro();
+    setPaywallBusy(false);
+    if (r.ok) {
+      setProOwned(true);
+      setShowPaywall(false);
+      play("achieve");
+      buzz.notify(Haptics.NotificationFeedbackType.Success).catch(() => {});
+      toastQueue.current.push({ eyebrow: "WELCOME TO PRO", name: "Everything is unlocked", desc: "Thanks for supporting Typo Tyrant!" });
+      if (!toastShowing.current) showNextToast();
+    } else if (!r.cancelled) setPaywallMsg(r.reason);
+  };
+
+  const restore = async () => {
+    if (paywallBusy) return;
+    setPaywallBusy(true);
+    setPaywallMsg("");
+    const r = await restorePro();
+    setPaywallBusy(false);
+    if (r.ok) {
+      setProOwned(true);
+      setShowPaywall(false);
+      setPaywallMsg("");
+    } else setPaywallMsg(r.reason);
+  };
+
+  const toggleLook = (royal: boolean) => {
+    const next: Look = royal ? "court" : "modern";
+    setLookState(next);
+    saveLook(next);
     buzz.select().catch(() => {});
   };
 
@@ -1361,6 +1780,15 @@ export default function Game() {
     buzz.notify(Haptics.NotificationFeedbackType.Warning).catch(() => {});
   };
 
+  /** Developer builds only: jump straight to a Tower floor (100 = the Typo Tyrant). */
+  const devClimb = (floor: number) => {
+    if (!__DEV__) return;
+    setShowSettings(false);
+    modeRef.current = "tower";
+    setModeState("tower");
+    startGame(false, floor);
+  };
+
   const openSettings = () => {
     setConfirmReset(null);
     setShowSettings(true);
@@ -1390,14 +1818,22 @@ export default function Game() {
   const onSubmit = () => {
     if (G.phase === "title" || (G.phase === "over" && !G.daily)) startGame();
     else if (G.phase === "paused") resume();
+    else if (G.phase === "banner") closeTwistCard();
   };
 
   /* ---------- render ---------- */
   const climbing = G.mode === "tower";
   const sprinting = G.mode === "sprint";
+  const zenMode = G.mode === "zen";
+  const rushMode = G.mode === "rush";
+  const suddenMode = G.mode === "sudden";
+  const mixMode = G.mode === "mix";
+  const mixTwist = mixMode && G.twist ? MIX_TWISTS[G.twist] : null;
+  // Vanishing: letters you haven't typed yet hide a moment after the word appears.
+  const lettersHidden = !!mixTwist?.vanish && G.phase === "playing" && Date.now() - G.wordShownAt >= MIX.vanishMs;
   const liveWpm = sprinting ? wpm(G.lettersTyped, sprintSeconds()) : 0;
   const total = climbing ? TOWER.wordsPerFloor : wordsInRound(G.round);
-  const startLives = climbing ? TOWER.lives : G.d.lives;
+  const startLives = climbing ? TOWER.lives : G.mode === "rush" ? RUSH.lives : G.mode === "sudden" ? 1 : G.d.lives;
   const oneLife = startLives === 1;
   const showNoLives = oneLife && G.lives <= 1; // Impossible, unless an Extra Life was used
   const low = !oneLife && G.lives > 0 && G.lives <= Math.ceil(startLives * 0.3);
@@ -1407,10 +1843,14 @@ export default function Game() {
   const accuracy = G.keys ? `${Math.round((G.goodKeys / G.keys) * 100)}%` : "–";
   const prevLimit = G.round > 1 ? timeForRound(G.round - 1, G.d) : G.limit;
   let bannerNote = "";
-  if (climbing) {
+  if (G.mode === "mix" && G.twist) {
+    bannerNote = `${MIX_TWISTS[G.twist].name}: ${MIX_TWISTS[G.twist].desc}`;
+  } else if (G.mode === "sudden" && G.round === 1) {
+    bannerNote = `Sudden Death · one life · ${SUDDEN.multiplier}× points`;
+  } else if (climbing) {
     bannerNote = isCheckpointFloor(G.round)
       ? G.round === TOWER.floors
-        ? "The final floor · a guardian waits at the top"
+        ? "The final floor · the Typo Tyrant waits at the top"
         : "Checkpoint floor · beat the guardian to save"
       : `Next checkpoint: floor ${nextCheckpoint(G.round)}`;
   } else if (G.round > 1) {
@@ -1418,45 +1858,175 @@ export default function Game() {
     if (wordsInRound(G.round) > wordsInRound(G.round - 1)) bannerNote += " · Longer round";
   }
 
+  /** Royal Court main menu: what the quest card, Daily card and buttons show for the chosen mode. */
+  const courtMenuProps = (): CourtMenuProps => {
+    const today = todayKey();
+    const rec = dailyRecord?.date === today ? dailyRecord : null;
+    const streakOn = dailyStreak.count > 0 && (dailyStreak.lastDate === today || dailyStreak.lastDate === yesterdayKey());
+    const streakText = streakOn ? `${dailyStreak.count}-day streak` : "";
+    const info = MODE_BY_ID[mode];
+    const n = (v: number) => v.toLocaleString();
+    const pills = DIFFICULTY_ORDER.map(id => ({
+      id,
+      label: DIFFICULTIES[id].label,
+      selected: difficulty === id,
+      onPress: () => chooseDifficulty(id),
+    }));
+    let quest: CourtMenuProps["quest"] = { name: info.name, tagline: info.tagline };
+    let startLabel = `Start ${info.name}`;
+    let difficulties: CourtMenuProps["difficulties"];
+    switch (mode) {
+      case "tower":
+        quest = {
+          name: "Tower Climb",
+          tagline: "Ascend 100 floors and face the Tyrant",
+          progress: tower.checkpoint / TOWER.floors,
+          detail: tower.cleared
+            ? `Summit reached · checkpoint: floor ${tower.checkpoint || "–"}`
+            : tower.checkpoint
+              ? `Checkpoint: floor ${tower.checkpoint} of ${TOWER.floors}`
+              : `Start at floor 1 · ${TOWER.lives} lives`,
+        };
+        startLabel = tower.checkpoint ? `Climb from floor ${tower.checkpoint + 1}` : "Begin the climb";
+        break;
+      case "classic":
+        difficulties = pills;
+        quest.detail = `${DIFFICULTIES[difficulty].words} · best ${n(best[difficulty])}${tower.cleared ? " · Phoenix Feather ready" : ""}`;
+        startLabel = `Begin · ${DIFFICULTIES[difficulty].label}`;
+        break;
+      case "sudden":
+        difficulties = pills;
+        quest.detail = `One life · ${SUDDEN.multiplier}× points · best ${n(suddenBest[difficulty])}`;
+        startLabel = "Face Sudden Death";
+        break;
+      case "sprint":
+        quest.detail = sprintBest.score
+          ? `Best ${n(sprintBest.score)} · ${sprintBest.words} words · ${sprintBest.wpm} wpm`
+          : `No lives · a miss costs ${SPRINT.missPenalty} second`;
+        startLabel = "Start the sprint";
+        break;
+      case "zen":
+        quest.detail = zenBest.wpm ? `Best ${zenBest.wpm} wpm · longest ${zenBest.words} words` : "Wrong letters cost nothing";
+        startLabel = "Enter Zen";
+        break;
+      case "rush":
+        quest.detail = rushBest.bosses ? `Best ${rushBest.bosses} bosses · ${n(rushBest.score)} points` : `${RUSH.lives} lives · a gold bonus after every win`;
+        startLabel = "Begin the rush";
+        break;
+      case "mix":
+        quest.detail = mixBest.score ? `Best ${n(mixBest.score)} · round ${mixBest.round}` : "A new twist every round";
+        startLabel = "Begin the mix";
+        break;
+    }
+    if (isProMode(mode) && !pro) {
+      quest.proNote =
+        trialsLeft(trials, mode, today) > 0 ? "Pro quest · 1 free try today" : "Pro quest · today’s free try is used · tap to unlock";
+    }
+    return {
+      c,
+      topInset: insets.top,
+      bottomInset: insets.bottom,
+      onSettings: openSettings,
+      daily: {
+        eyebrow: `ROYAL DECREE · ${prettyDate(today).toUpperCase()}`,
+        title: rec ? (rec.finished ? `${n(rec.score)} points · round ${rec.round}` : "Today’s try is used") : "Today’s challenge awaits",
+        detail: rec
+          ? `Next decree in ${timeUntilTomorrow()}${streakText ? ` · ${streakText}` : ""}`
+          : `One attempt${streakText ? ` · ${streakText}` : " · same words for everyone"}`,
+        done: !!rec,
+        onPlay: () => startGame(true),
+      },
+      mode,
+      quest,
+      onChangeMode: () => setShowModes(true),
+      onProNote: openPaywall,
+      difficulties,
+      startLabel,
+      onStart: () => startGame(),
+      trophies: `Trophies ${Object.keys(unlocked).length}/${ACHIEVEMENTS.length}`,
+      onCodex: () => setShowHelp(true),
+      onChronicle: () => setShowStats(true),
+      onTrophies: () => setShowAchievements(true),
+      onArmory: () => setShowCustomize(true),
+      royalPass: { show: !pro, price: proPrice, onPress: openPaywall },
+    };
+  };
+
   return (
-    <View style={[s.root, { paddingTop: insets.top + 12, paddingBottom: Math.max(insets.bottom, kbHeight) + 12 }]}>
+    <View
+      style={[
+        s.root,
+        // On wide screens (iPad, especially in landscape) keep the play area a comfortable column.
+        { paddingHorizontal: Math.max(18, (width - MAX_PLAY_WIDTH) / 2) },
+        { paddingTop: insets.top + 12, paddingBottom: Math.max(insets.bottom, kbHeight) + 12 },
+      ]}
+    >
       <StatusBar style={isDark || G.inBoss ? "light" : "dark"} />
 
       {/* HUD */}
       <View style={s.hud}>
         <View style={s.stat}>
-          <Text style={s.label}>SCORE</Text>
-          <Text style={s.value}>{G.score.toLocaleString()}</Text>
-          <Text style={s.meta}>
+          <Text style={s.label}>{zenMode ? "WORDS" : "SCORE"}</Text>
+          <Text style={s.value}>{zenMode ? G.wordsTyped : G.score.toLocaleString()}</Text>
+          <Text style={s.hudMeta}>
             {G.daily
               ? `Daily · ${prettyDate(G.dailyDate)}`
-              : climbing
+              : zenMode
+                ? "Zen · no clock"
+                : rushMode
+                ? `Boss Rush · Best ${Math.max(rushBest.bosses, G.bossesDefeated)}`
+                : mixMode
+                ? `Mix · Best ${Math.max(mixBest.score, G.score).toLocaleString()}`
+                : suddenMode
+                ? `Sudden ${G.d.label} · Best ${Math.max(suddenBest[G.d.id], G.score).toLocaleString()}`
+                : climbing
                 ? `Tower · checkpoint ${tower.checkpoint || "–"}`
                 : sprinting
                   ? `Sprint · Best ${Math.max(sprintBest.score, G.score).toLocaleString()}`
                   : `${G.d.label} · Best ${Math.max(bestHere, G.score).toLocaleString()}`}
           </Text>
         </View>
-        <ComboBadge c={c} streak={G.streak} pop={comboPop} />
+        <ComboBadge c={c} streak={G.streak} pop={comboPop} streakOnly={zenMode} />
         <View style={[s.stat, { alignItems: "flex-end" }]}>
-          <Text style={s.label}>{climbing ? "FLOOR" : sprinting ? "WORDS" : "ROUND"}</Text>
-          <Text style={s.value}>{sprinting ? G.wordsTyped : G.round}</Text>
-          <Text style={s.meta}>
-            {sprinting ? `${liveWpm} wpm` : G.inBoss ? `boss · ${G.bossHp} of ${G.bossMaxHp} HP` : `word ${Math.min(G.wordInRound + 1, total)} of ${total}`}
+          <Text style={s.label}>{climbing ? "FLOOR" : sprinting ? "WORDS" : zenMode ? "SPEED" : rushMode ? "BOSS" : "ROUND"}</Text>
+          <Text style={s.value}>{sprinting ? G.wordsTyped : zenMode ? zenWpm() : G.round}</Text>
+          <Text style={s.hudMeta}>
+            {zenMode ? `wpm · ${accuracy} accurate` : sprinting ? `${liveWpm} wpm` : G.inBoss ? `boss · ${G.bossHp} of ${G.bossMaxHp} HP` : `word ${Math.min(G.wordInRound + 1, total)} of ${total}`}
           </Text>
         </View>
       </View>
       <View style={s.livesRow}>
-        <Text style={[s.label, (low || showNoLives) && { color: c.miss }]}>
-          {sprinting
+        <Text
+          style={[
+            s.label,
+            (low || showNoLives) && { color: c.miss },
+            // Royal Court shows lives as shields only, no "LIVES n" label
+            look === "court" && !showNoLives && !sprinting && !zenMode && { display: "none" },
+          ]}
+        >
+          {zenMode
+            ? "NO LIVES · NO CLOCK · TAKE YOUR TIME"
+            : sprinting
             ? `NO LIVES · A MISS COSTS ${SPRINT.missPenalty} SECOND`
             : showNoLives
               ? "NO LIVES · ONE MISS ENDS IT"
               : `LIVES ${G.lives}`}
         </Text>
-        <View style={[s.pips, (showNoLives || sprinting) && { display: "none" }]}>
+        <View style={[s.pips, (showNoLives || sprinting || zenMode) && { display: "none" }]}>
           {pips.slice(0, Math.max(startLives, G.lives)).map((p, i) => {
             const lost = i >= G.lives;
+            if (look === "court") {
+              const many = Math.max(startLives, G.lives) > 6;
+              return (
+                <Animated.View key={i} style={{ transform: [{ scale: p }], opacity: !lost && low ? pulse : 1 }}>
+                  <ShieldIcon
+                    size={many ? 22 : 26}
+                    fill={lost ? c.line : low ? c.miss : "#C8243B"}
+                    stroke={lost ? c.ghost : c.gold}
+                  />
+                </Animated.View>
+              );
+            }
             return (
               <Animated.View
                 key={i}
@@ -1471,16 +2041,60 @@ export default function Game() {
         </View>
       </View>
 
+      {mixTwist && G.phase !== "title" && (
+        <Text style={[s.label, { textAlign: "center", marginTop: 8, color: c.gold }]} numberOfLines={1}>
+          {mixTwist.name.toUpperCase()} · {mixTwist.desc}
+        </Text>
+      )}
+
       {G.inBoss && G.phase !== "banner" && (
-        <View style={s.bossBar} accessibilityLabel={`${G.bossName}: ${G.bossHp} of ${G.bossMaxHp} health left`}>
-          <Text style={[s.label, { color: c.miss }]} numberOfLines={1}>
-            BOSS · {G.bossName.toUpperCase()}
-          </Text>
-          <View style={s.bossHpRow}>
-            {Array.from({ length: G.bossMaxHp }, (_, i) => (
-              <View key={i} style={[s.bossHpSeg, { backgroundColor: i < G.bossHp ? c.miss : c.line }]} />
-            ))}
+        <View
+          style={s.bossBar}
+          accessibilityLabel={`${G.bossName}: ${G.bossHp} of ${G.bossMaxHp} health left${G.bossArmor > 1 ? `, armored: ${G.bossArmor} words per block` : ""}`}
+        >
+          {look === "court" ? (
+            <>
+              <Text style={[s.label, { color: c.gold, letterSpacing: 3 }]}>{G.bossArmor > 1 ? "FINAL BOSS" : "BOSS"}</Text>
+              <Text style={s.courtBossName} numberOfLines={1}>
+                {G.bossName}
+              </Text>
+            </>
+          ) : (
+            <Text style={[s.label, { color: G.bossArmor > 1 ? c.gold : c.miss }]} numberOfLines={1}>
+              {G.bossArmor > 1 ? "FINAL BOSS" : "BOSS"} · {G.bossName.toUpperCase()}
+            </Text>
+          )}
+          <View style={[s.bossHpRow, G.bossArmor > 1 && [s.bossArmored, { borderColor: c.gold }]]}>
+            {Array.from({ length: G.bossMaxHp }, (_, i) => {
+              const alive = i < G.bossHp;
+              const cracked = alive && i === G.bossHp - 1 && G.bossChip > 0; // armored block that's taken a hit
+              return (
+                <View
+                  key={i}
+                  style={[
+                    s.bossHpSeg,
+                    { backgroundColor: alive ? c.miss : c.line },
+                    G.bossArmor > 1 && { height: 16 },
+                    G.bossArmor > 1 && alive && { borderWidth: 2, borderColor: c.gold },
+                  ]}
+                >
+                  {cracked && (
+                    <View
+                      style={[
+                        s.bossCrack,
+                        { width: `${(G.bossChip / G.bossArmor) * 100}%`, backgroundColor: c.line },
+                      ]}
+                    />
+                  )}
+                </View>
+              );
+            })}
           </View>
+          {G.bossArmor > 1 && (
+            <Text style={[s.meta, { color: c.gold }, look === "court" && { fontSize: 11 }]} numberOfLines={1} adjustsFontSizeToFit>
+              Armored · {G.bossArmor} words per block{G.bossRegen ? " · heals when you're slow" : ""}
+            </Text>
+          )}
         </View>
       )}
 
@@ -1525,6 +2139,9 @@ export default function Game() {
               if (G.look === "solved") color = c.good;
               if (G.look === "timedOut") color = c.miss;
               if (G.look === "skipped") color = c.muted;
+              if (lettersHidden && !done && !wrong) color = "transparent";
+              // Masked: every other letter shows as "_" until it's typed.
+              const masked = !!mixTwist?.masked && i % 2 === 1 && !done && !wrong && G.look === "normal";
               return (
                 <Animated.View
                   key={i}
@@ -1534,8 +2151,8 @@ export default function Game() {
                     wrong && { transform: [{ scale: letterPop }] },
                   ]}
                 >
-                  <Text style={[s.letter, { fontSize, color }]} allowFontScaling={false}>
-                    {ch}
+                  <Text style={[s.letter, { fontSize, color: masked ? c.muted : color }]} allowFontScaling={false}>
+                    {masked ? "_" : ch}
                   </Text>
                   <View
                     style={[
@@ -1553,26 +2170,48 @@ export default function Game() {
         </View>
 
         <View style={s.fuse}>
-          <View style={s.fuseTrack}>
-            <Animated.View style={[s.fuseFill, { backgroundColor: c.accent, transform: [{ scaleX: fuse }] }]} />
+          <View style={[s.fuseTrack, zenMode && { display: "none" }]}>
+            {look === "court" ? (
+              <Animated.View style={[s.fuseFill, { transform: [{ scaleX: fuse }] }]}>
+                <LinearGradient
+                  colors={G.inBoss ? ["#C8243B", "#FF8A3D"] : [c.accent, c.gold]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={StyleSheet.absoluteFill}
+                />
+              </Animated.View>
+            ) : (
+              <Animated.View style={[s.fuseFill, { backgroundColor: c.accent, transform: [{ scaleX: fuse }] }]} />
+            )}
             <Animated.View
               style={[s.fuseFill, s.fuseHot, { backgroundColor: c.miss, opacity: hotOpacity, transform: [{ scaleX: fuse }] }]}
             />
           </View>
           <View style={s.fuseRow}>
-            <Text style={s.meta}>
-              {sprinting ? "Sprint clock " : "Time per word "}
-              <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>
-                {formatSeconds(G.phase === "banner" || G.phase === "title" ? G.limit : G.wordLimit)}
-              </Text>
-            </Text>
-            <Remaining G={G} style={s.meta} />
+            {zenMode ? (
+              <>
+                <Text style={s.meta}>No clock · type at your own pace</Text>
+                <ZenTimer seconds={zenSeconds} style={s.meta} />
+              </>
+            ) : (
+              <>
+                <Text style={s.meta}>
+                  {sprinting ? "Sprint clock " : "Time per word "}
+                  <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>
+                    {formatSeconds(G.phase === "banner" || G.phase === "title" ? G.limit : G.wordLimit)}
+                  </Text>
+                </Text>
+                <Remaining G={G} style={s.meta} />
+              </>
+            )}
           </View>
         </View>
 
         <Text style={s.hint}>
           {G.phase === "playing" && sprinting && G.wordsTyped === 0
             ? `As many words as you can. Wrong letters cost ${SPRINT.missPenalty} second.`
+            : G.phase === "playing" && zenMode && G.wordsTyped === 0
+            ? "No clock and no lives. Tap FINISH when you're done."
             : G.phase === "playing" && G.round === 1 && G.wordInRound === 0
             ? oneLife
               ? "Type the word. One wrong letter ends the game."
@@ -1583,16 +2222,39 @@ export default function Game() {
         </Text>
       </Pressable>
 
-      {!sprinting && <PowerUpTray c={c} G={G} onUse={activatePowerUp} onUseBonus={activateBonus} />}
+      {!sprinting && !zenMode && <PowerUpTray c={c} G={G} onUse={activatePowerUp} onUseBonus={activateBonus} />}
 
       <View style={s.controls}>
-        <Pressable style={s.chip} onPress={() => (G.phase === "paused" ? resume() : pause())} hitSlop={8}>
-          <Text style={s.chipText}>{G.phase === "paused" ? "RESUME" : "PAUSE"}</Text>
-        </Pressable>
-        <Pressable style={s.chip} onPress={toggleMute} hitSlop={8}>
+        {look === "court" ? (
+          <Pressable
+            style={s.courtRound}
+            onPress={() => (G.phase === "paused" ? resume() : pause())}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={G.phase === "paused" ? "Resume" : "Pause"}
+          >
+            <PauseIcon color={c.gold} />
+          </Pressable>
+        ) : (
+          <Pressable style={s.chip} onPress={() => (G.phase === "paused" ? resume() : pause())} hitSlop={8}>
+            <Text style={s.chipText}>{G.phase === "paused" ? "RESUME" : "PAUSE"}</Text>
+          </Pressable>
+        )}
+        {zenMode && G.phase !== "over" && G.phase !== "title" && (
+          <Pressable
+            style={[s.chip, { borderColor: c.accent }]}
+            onPress={finishZen}
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel="Finish the Zen session"
+          >
+            <Text style={[s.chipText, { color: c.accent }]}>FINISH</Text>
+          </Pressable>
+        )}
+        <Pressable style={[s.chip, look === "court" && { display: "none" }]} onPress={toggleMute} hitSlop={8}>
           <Text style={s.chipText}>{muted ? "SOUND OFF" : "SOUND ON"}</Text>
         </Pressable>
-        <Pressable style={s.chip} onPress={toggleMusic} hitSlop={8}>
+        <Pressable style={[s.chip, look === "court" && { display: "none" }]} onPress={toggleMusic} hitSlop={8}>
           <Text style={s.chipText}>{musicOn ? "MUSIC ON" : "MUSIC OFF"}</Text>
         </Pressable>
       </View>
@@ -1635,7 +2297,9 @@ export default function Game() {
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, s.flash, { opacity: flash }]} />
 
       {/* Overlays */}
-      {G.phase === "title" && (
+      {G.phase === "title" && look === "court" && <CourtMenu {...courtMenuProps()} />}
+
+      {G.phase === "title" && look !== "court" && (
         <Overlay c={c} pop={overlayPop}>
           <View style={s.achHead}>
             <Text style={[s.eyebrow, { flex: 1, paddingTop: 6 }]}>A TYPING SURVIVAL GAME</Text>
@@ -1643,7 +2307,7 @@ export default function Game() {
               <Text style={s.chipText}>SETTINGS</Text>
             </Pressable>
           </View>
-          <Text style={s.h1}>TypeSpeedy</Text>
+          <Text style={s.h1}>Typo Tyrant</Text>
           <Text style={s.demo}>
             <Text style={{ color: c.ink }}>surv</Text>
             <Text style={{ color: c.miss, textDecorationLine: "underline" }}>i</Text>
@@ -1675,7 +2339,86 @@ export default function Game() {
               <Text style={s.chipText}>CHANGE</Text>
             </View>
           </Pressable>
-          {mode === "sprint" ? (
+          {isProMode(mode) && !pro && (
+            <Pressable onPress={openPaywall} style={s.proLine} accessibilityRole="button">
+              <Text style={s.proBadge}>PRO</Text>
+              <Text style={[s.slotEffect, { flex: 1 }]}>
+                {trialsLeft(trials, mode, todayKey()) > 0
+                  ? "Pro mode · you have a free try today"
+                  : "Pro mode · today’s free try is used. Tap to unlock Pro."}
+              </Text>
+            </Pressable>
+          )}
+          {mode === "mix" ? (
+            <>
+              <View style={s.towerCard}>
+                <Text style={[s.label, { color: c.gold }]}>MARATHON MIX</Text>
+                <Text style={s.dailyTitle}>
+                  {mixBest.score ? `Best ${mixBest.score.toLocaleString()} · round ${mixBest.round}` : "Expect the unexpected"}
+                </Text>
+                <Text style={s.slotEffect}>
+                  Medium rules · 10 lives · every round has a twist:{" "}
+                  {(Object.values(MIX_TWISTS) as { id: MixTwistId; name: string }[])
+                    .filter(t => t.id !== "warmup")
+                    .map(t => t.name)
+                    .join(", ")}
+                </Text>
+              </View>
+              <Btn c={c} label="Start Marathon Mix" onPress={() => startGame()} />
+            </>
+          ) : mode === "sudden" ? (
+            <>
+              <Text style={s.label}>DIFFICULTY</Text>
+              <View style={s.diffGrid} accessibilityRole="radiogroup">
+                {DIFFICULTY_ORDER.map(id => (
+                  <DifficultyCard
+                    key={id}
+                    c={c}
+                    d={DIFFICULTIES[id]}
+                    best={suddenBest[id]}
+                    selected={difficulty === id}
+                    onPress={() => chooseDifficulty(id)}
+                    livesOverride={1}
+                  />
+                ))}
+              </View>
+              <Text style={[s.slotEffect, { color: c.miss }]}>
+                One life on any difficulty. A wrong letter or a slow word ends it. Every point counts {SUDDEN.multiplier}×, and
+                extra lives never drop.
+              </Text>
+              <Btn c={c} label={`Start Sudden Death · ${G.d.label}`} onPress={() => startGame()} />
+            </>
+          ) : mode === "rush" ? (
+            <>
+              <View style={s.towerCard}>
+                <Text style={[s.label, { color: c.miss }]}>BOSS RUSH</Text>
+                <Text style={s.dailyTitle}>
+                  {rushBest.bosses
+                    ? `Best: ${rushBest.bosses} boss${rushBest.bosses === 1 ? "" : "es"}`
+                    : "How many bosses can you beat?"}
+                </Text>
+                <Text style={s.slotEffect}>
+                  {rushBest.score ? `Top score ${rushBest.score.toLocaleString()} · ` : ""}
+                  {RUSH.lives} lives · Medium rules · every boss is a little faster · a gold bonus after each win
+                </Text>
+              </View>
+              <Btn c={c} label="Start Boss Rush" onPress={() => startGame()} />
+            </>
+          ) : mode === "zen" ? (
+            <>
+              <View style={s.towerCard}>
+                <Text style={[s.label, { color: c.gold }]}>ZEN · PRACTICE</Text>
+                <Text style={s.dailyTitle}>{zenBest.wpm ? `Best ${zenBest.wpm} wpm` : "No clock, no pressure"}</Text>
+                <Text style={s.slotEffect}>
+                  {zenBest.sessions
+                    ? `Longest session ${zenBest.words} words · ${zenBest.sessions} session${zenBest.sessions === 1 ? "" : "s"} · `
+                    : ""}
+                  Wrong letters turn red but cost nothing · tap Finish to see your speed and accuracy
+                </Text>
+              </View>
+              <Btn c={c} label="Start Zen" onPress={() => startGame()} />
+            </>
+          ) : mode === "sprint" ? (
             <>
               <View style={s.towerCard}>
                 <Text style={[s.label, { color: c.gold }]}>SPRINT · {SPRINT.seconds} SECONDS</Text>
@@ -1740,6 +2483,17 @@ export default function Game() {
               <Btn c={c} label="Customize" onPress={() => setShowCustomize(true)} secondary />
             </View>
           </View>
+          {!pro && (
+            <Pressable
+              onPress={openPaywall}
+              style={({ pressed }) => [s.proCta, pressed && { transform: [{ scale: 0.98 }] }]}
+              accessibilityRole="button"
+            >
+              <Text style={[s.label, { color: c.gold }]}>TYPO TYRANT PRO</Text>
+              <Text style={s.dailyTitle}>Unlock every mode and theme</Text>
+              <Text style={s.slotEffect}>One payment of {proPrice} · no subscription, no ads</Text>
+            </Pressable>
+          )}
         </Overlay>
       )}
 
@@ -1765,6 +2519,10 @@ export default function Game() {
               unlockedCount={Object.keys(unlocked).length}
               sprint={sprintBest}
               tower={tower}
+              zen={zenBest}
+              rush={rushBest}
+              sudden={suddenBest}
+              mix={mixBest}
             />
           )}
           <Btn c={c} label="Done" onPress={() => setShowStats(false)} />
@@ -1793,6 +2551,7 @@ export default function Game() {
               >
                 <View style={s.bonusRow}>
                   <Text style={[s.diffLabel, mode === m.id && { color: c.accent }]}>{m.name}</Text>
+                  {isProMode(m.id) && !pro && <Text style={s.proBadge}>PRO</Text>}
                   {mode === m.id && <Text style={s.achDate}>SELECTED</Text>}
                 </View>
                 <Text style={[s.diffDetail, { fontVariant: undefined }]}>{m.tagline}</Text>
@@ -1814,7 +2573,9 @@ export default function Game() {
               <Text style={s.chipText}>CLOSE</Text>
             </Pressable>
           </View>
-          <Text style={s.body}>Earn achievements to unlock new color themes and word packs.</Text>
+          <Text style={s.body}>
+            Earn achievements to unlock new color themes and word packs.{pro ? "" : " Using them needs Typo Tyrant Pro."}
+          </Text>
           <Text style={s.label}>COLOR THEME</Text>
           <View style={s.diffGrid} accessibilityRole="radiogroup">
             {THEMES.map(t => (
@@ -1823,8 +2584,9 @@ export default function Game() {
                 c={c}
                 t={t}
                 preview={themePalette(t.id, systemDark).c}
-                open={meetsRequirement(t.requires, unlocked)}
-                selected={themeId === t.id}
+                open={devUnlockAll || (meetsRequirement(t.requires, unlocked) && (pro || t.id === "classic"))}
+                needsPro={!devUnlockAll && meetsRequirement(t.requires, unlocked) && !pro && t.id !== "classic"}
+                selected={(canStyle ? themeId : "classic") === t.id}
                 onPress={() => chooseTheme(t)}
               />
             ))}
@@ -1836,8 +2598,9 @@ export default function Game() {
                 key={p.id}
                 c={c}
                 p={p}
-                open={meetsRequirement(p.requires, unlocked)}
-                selected={packId === p.id}
+                open={devUnlockAll || (meetsRequirement(p.requires, unlocked) && (pro || p.id === "classic"))}
+                needsPro={!devUnlockAll && meetsRequirement(p.requires, unlocked) && !pro && p.id !== "classic"}
+                selected={(canStyle ? packId : "classic") === p.id}
                 onPress={() => choosePack(p)}
               />
             ))}
@@ -1903,13 +2666,33 @@ export default function Game() {
           <Rule c={c} k="ROUNDS" v="Ten words a round. The clock gets shorter every round, and late rounds get longer." />
           <Rule
             c={c}
+            k="MIX"
+            v="Marathon Mix: Survival on Medium where every round has a twist, like backwards words, vanishing letters, giant bosses or double-or-nothing."
+          />
+          <Rule
+            c={c}
+            k="SUDDEN"
+            v={`Sudden Death: Survival on any difficulty with one life and ${SUDDEN.multiplier}× points. Extra lives never drop.`}
+          />
+          <Rule
+            c={c}
+            k="RUSH"
+            v={`Boss Rush: nothing but bosses, each a little faster than the last, with ${RUSH.lives} lives. Every win gives you a gold bonus.`}
+          />
+          <Rule
+            c={c}
+            k="ZEN"
+            v="Zen: no clock, no lives and no score. Type at your own pace and tap Finish to see your speed and accuracy."
+          />
+          <Rule
+            c={c}
             k="SPRINT"
             v={`Sprint: ${SPRINT.seconds} seconds to type as many words as you can. No lives or power-ups; each wrong letter takes ${SPRINT.missPenalty} second off the clock.`}
           />
           <Rule
             c={c}
             k="TOWER"
-            v={`Tower Climb: ${TOWER.floors} floors of ${TOWER.wordsPerFloor} words on Medium rules with just ${TOWER.lives} lives. Every ${TOWER.checkpointEvery}th floor has a guardian; beat it to save a checkpoint. Reach the top to unlock the Phoenix Feather for Survival.`}
+            v={`Tower Climb: ${TOWER.floors} floors of ${TOWER.wordsPerFloor} words on Medium rules with just ${TOWER.lives} lives. Every ${TOWER.checkpointEvery}th floor has a guardian; beat it to save a checkpoint. Defeat the Typo Tyrant on floor ${TOWER.floors} to unlock the Phoenix Feather for Survival.`}
           />
           <Rule
             c={c}
@@ -1942,6 +2725,18 @@ export default function Game() {
             </Pressable>
           </View>
 
+          <Text style={s.label}>LOOK</Text>
+          <View style={s.setGroup}>
+            <SettingRow
+              c={c}
+              label="Royal Court design"
+              detail="Gold trim, carved titles and shield lives. Turn off for the original clean design."
+              value={look === "court"}
+              onChange={toggleLook}
+              last
+            />
+          </View>
+
           <Text style={s.label}>SOUND</Text>
           <View style={s.setGroup}>
             <SettingRow c={c} label="Sound effects" detail="Key clicks, misses and fanfares" value={!muted} onChange={toggleMute} />
@@ -1967,8 +2762,89 @@ export default function Game() {
             />
           </View>
 
+          <Text style={s.label}>DAILY CHALLENGE</Text>
+          <View style={s.setGroup}>
+            <SettingRow
+              c={c}
+              label="Daily reminder"
+              detail="A nudge when the new challenge is ready (skipped once you've played)"
+              value={reminder.on}
+              onChange={on => updateReminder({ ...reminder, on, asked: true })}
+              last={!reminder.on}
+            />
+            {reminder.on && (
+              <View style={[s.setRow, { flexWrap: "wrap" }]}>
+                {REMINDER_TIMES.map(t => (
+                  <Pressable
+                    key={t.hour}
+                    onPress={() => updateReminder({ ...reminder, hour: t.hour })}
+                    style={[s.chip, reminder.hour === t.hour && { borderColor: c.accent, backgroundColor: c.accentSoft }]}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: reminder.hour === t.hour }}
+                  >
+                    <Text style={[s.chipText, reminder.hour === t.hour && { color: c.accent }]}>{t.label.toUpperCase()}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+          </View>
+
           {G.phase === "title" && (
             <>
+              <Text style={s.label}>TYPO TYRANT PRO</Text>
+              <View style={s.setGroup}>
+                <View style={[s.setRow, { borderBottomWidth: 1, borderBottomColor: c.line }]}>
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={[s.slotName, { color: pro ? c.gold : c.ink }]}>{pro ? "Pro unlocked" : "Free version"}</Text>
+                    <Text style={s.slotEffect}>
+                      {pro ? "Every mode, theme and word pack. Thank you!" : `Unlock every mode and theme for ${proPrice}`}
+                    </Text>
+                  </View>
+                  {!pro && (
+                    <Pressable style={[s.chip, { borderColor: c.gold }]} onPress={openPaywall} hitSlop={8}>
+                      <Text style={[s.chipText, { color: c.gold }]}>UNLOCK</Text>
+                    </Pressable>
+                  )}
+                </View>
+                <Pressable style={s.setRow} onPress={restore} accessibilityRole="button">
+                  <Text style={[s.slotName, { color: c.ink, flex: 1 }]}>Restore purchases</Text>
+                  <Text style={s.slotEffect}>{paywallBusy ? "Checking…" : ""}</Text>
+                </Pressable>
+              </View>
+              {paywallMsg && !showPaywall ? <Text style={s.slotEffect}>{paywallMsg}</Text> : null}
+              {__DEV__ && (
+                <>
+                  <Text style={s.label}>DEVELOPER (TEST BUILDS ONLY)</Text>
+                  <View style={s.setGroup}>
+                    <SettingRow
+                      c={c}
+                      label="Unlock all themes & packs"
+                      detail="Try every color theme and word pack in Customize. Doesn't save, unlock achievements or give Pro."
+                      value={devUnlockAll}
+                      onChange={on => {
+                        devUnlockRef.current = on;
+                        setDevUnlockAll(on);
+                      }}
+                      last
+                    />
+                  </View>
+                  <View style={s.btnGrid}>
+                    <View style={s.btnHalf}>
+                      <Btn c={c} label="Fight Typo Tyrant" onPress={() => devClimb(TOWER.floors)} secondary />
+                    </View>
+                    <View style={s.btnHalf}>
+                      <Btn c={c} label="Climb from floor 91" onPress={() => devClimb(TOWER.floors - 9)} secondary />
+                    </View>
+                  </View>
+                  <Text style={s.slotEffect}>
+                    Only in development builds. Starting doesn’t move your checkpoint, but beating the Typo Tyrant still counts as reaching the top.
+                  </Text>
+                </>
+              )}
+              {__DEV__ && pro && (
+                <Btn c={c} label="Turn Pro off on this device (testing)" onPress={() => setProOwned(false)} secondary />
+              )}
+
               <Text style={s.label}>LOOK & WORDS</Text>
               <Btn
                 c={c}
@@ -2005,39 +2881,84 @@ export default function Game() {
           )}
 
           <Text style={s.slotEffect}>
-            TypeSpeedy {APP_VERSION} · Music and sounds are original, made for this game · Fonts: Bricolage Grotesque, IBM Plex
+            Typo Tyrant {APP_VERSION} · Music and sounds are original, made for this game · Fonts: Bricolage Grotesque, IBM Plex
             Mono and Inter (SIL Open Font License)
           </Text>
           <Btn c={c} label="Done" onPress={() => setShowSettings(false)} />
         </Overlay>
       )}
 
-      {G.phase === "banner" && (
+      {G.phase === "banner" && mixTwist && !G.inBoss && (
+        <Pressable
+          style={[StyleSheet.absoluteFill, s.scrim]}
+          onPress={() => closeTwistCard()}
+          accessibilityRole="button"
+          accessibilityLabel={`Round ${G.round}: ${mixTwist.name}. ${mixTwist.desc} Tap to start.`}
+        >
+          <Animated.View style={[s.panel, s.twistCard, { transform: [{ scale: overlayPop }] }]}>
+            <Text style={[s.eyebrow, { color: c.gold }]}>
+              ROUND {G.round} · {G.round === 1 ? "MARATHON MIX" : "NEW TWIST"}
+            </Text>
+            <Text style={s.h2}>{mixTwist.name}</Text>
+            <Text style={[s.body, { color: c.ink, fontSize: 17, lineHeight: 24 }]}>{mixTwist.desc}</Text>
+            <View style={s.activeRow}>
+              {twistChips(mixTwist).map(chip => (
+                <View key={chip.text} style={[s.activeChip, { borderColor: chip.bad ? c.miss : c.good }]}>
+                  <Text style={[s.activeText, { color: chip.bad ? c.miss : c.good }]}>{chip.text}</Text>
+                </View>
+              ))}
+            </View>
+            <Text style={s.meta}>
+              {total} words · {formatSeconds(G.limit)} per word · then a boss
+            </Text>
+            <View style={s.fuseTrack}>
+              <Animated.View style={[s.fuseFill, { backgroundColor: c.gold, transform: [{ scaleX: twistTimer }] }]} />
+            </View>
+            <Text style={[s.meta, { textAlign: "center" }]}>Tap anywhere to start</Text>
+          </Animated.View>
+        </Pressable>
+      )}
+
+      {G.phase === "banner" && !(mixTwist && !G.inBoss) && (
         <View style={[StyleSheet.absoluteFill, s.bannerWrap]} pointerEvents="none">
           {G.inBoss ? (
             <Animated.View style={[s.banner, { transform: [{ scale: overlayPop }] }]}>
               <Text style={[s.label, { color: c.miss, letterSpacing: 4 }]}>
-                {climbing ? (G.round === TOWER.floors ? "FINAL GUARDIAN" : "CHECKPOINT GUARDIAN") : "BOSS FIGHT"}
+                {climbing
+                  ? G.round === TOWER.floors
+                    ? "FINAL GUARDIAN"
+                    : "CHECKPOINT GUARDIAN"
+                  : rushMode
+                    ? `BOSS RUSH · BOSS ${G.round}`
+                    : "BOSS FIGHT"}
               </Text>
               <Text style={s.bossName}>{G.bossName}</Text>
               <Text style={s.bannerSub}>
-                Type <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{G.bossMaxHp}</Text> words to
+                Type <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{G.bossMaxHp * G.bossArmor}</Text> words to
                 defeat it ·{" "}
                 <Text style={{ color: c.ink, fontFamily: fonts.bodyStrong }}>{formatSeconds(G.limit)}</Text> per word
               </Text>
               <Text style={[s.bannerNote, { color: c.gold }]}>
                 {climbing
                   ? G.round === TOWER.floors
-                    ? "Beat it to reach the top"
+                    ? `Armored: ${G.bossArmor} words per block · it heals every time you run out of time`
                     : `Beat it to save floor ${G.round} as a checkpoint`
                   : "Win a gold bonus power-up"}
               </Text>
             </Animated.View>
           ) : (
           <Animated.View style={[s.banner, { transform: [{ scale: overlayPop }] }]}>
-            <Text style={s.label}>{climbing ? `FLOOR · OF ${TOWER.floors}` : sprinting ? "SPRINT" : "ROUND"}</Text>
+            <Text style={s.label}>{climbing ? `FLOOR · OF ${TOWER.floors}` : sprinting ? "SPRINT" : zenMode ? "ZEN MODE" : "ROUND"}</Text>
+            {zenMode ? (
+              <>
+                <Text style={[s.bannerBig, { fontSize: 80, lineHeight: 86 }]}>Breathe</Text>
+                <Text style={s.bannerSub}>No clock · no lives · no score</Text>
+                <Text style={s.bannerNote}>Tap FINISH when you’re done</Text>
+              </>
+            ) : (
             <Text style={s.bannerBig}>{sprinting ? SPRINT.seconds : G.round}</Text>
-            {sprinting ? (
+            )}
+            {zenMode ? null : sprinting ? (
               <>
                 <Text style={s.bannerSub}>seconds · as many words as you can</Text>
                 <Text style={s.bannerNote}>A wrong letter costs {SPRINT.missPenalty} second</Text>
@@ -2068,15 +2989,24 @@ export default function Game() {
         </Overlay>
       )}
 
-      {G.phase === "paused" && (
+      {/* Hidden while Settings is open on top of a paused game; closing Settings brings it back. */}
+      {G.phase === "paused" && !showSettings && (
         <Overlay c={c} pop={overlayPop}>
           <Text style={s.eyebrow}>PAUSED</Text>
           <Text style={s.h2}>Take a breath</Text>
-          <Text style={s.body}>The clock is stopped. Your word will be waiting.</Text>
+          <Text style={s.body}>{zenMode ? "Your word will be waiting." : "The clock is stopped. Your word will be waiting."}</Text>
           {confirmQuit ? (
             <>
               <Text style={[s.body, { color: c.ink }]}>
-                {sprinting
+                {mixMode
+                  ? `Quit this run? Your score of ${G.score.toLocaleString()} still counts toward your Mix best.`
+                  : suddenMode
+                  ? `Quit this run? Your score of ${G.score.toLocaleString()} still counts toward your Sudden Death best.`
+                  : rushMode
+                  ? `Quit this rush? Your ${G.bossesDefeated} boss${G.bossesDefeated === 1 ? "" : "es"} still count toward your best.`
+                  : zenMode
+                  ? "Leave this session? Use FINISH instead to see your summary."
+                  : sprinting
                   ? "Quit this sprint? Your score still counts toward your Sprint best."
                   : climbing
                   ? `Quit this climb? You'll start from floor ${tower.checkpoint + 1} next time.`
@@ -2088,6 +3018,7 @@ export default function Game() {
           ) : (
             <>
               <Btn c={c} label="Resume" onPress={resume} />
+              {zenMode && <Btn c={c} label="Finish and see summary" onPress={finishZen} secondary />}
               <Btn c={c} label="Settings" onPress={openSettings} secondary />
               <Btn c={c} label="Quit to main menu" onPress={() => setConfirmQuit(true)} secondary />
             </>
@@ -2100,7 +3031,15 @@ export default function Game() {
           <Text style={[s.eyebrow, { color: G.daily || G.towerTop ? c.gold : c.miss }]}>
             {G.daily
               ? `DAILY CHALLENGE · ${prettyDate(G.dailyDate).toUpperCase()}`
-              : sprinting
+              : rushMode
+                ? "BOSS RUSH · OUT OF LIVES"
+                : suddenMode
+                ? `SUDDEN DEATH · ${G.d.label.toUpperCase()}`
+                : mixMode
+                ? "MARATHON MIX · OUT OF LIVES"
+                : zenMode
+                ? "ZEN · SESSION COMPLETE"
+                : sprinting
                 ? "SPRINT · TIME'S UP"
                 : climbing
                 ? G.towerTop
@@ -2109,7 +3048,11 @@ export default function Game() {
                 : `${G.d.label.toUpperCase()} · ${oneLife ? "GAME OVER" : "OUT OF LIVES"}`}
           </Text>
           <Text style={s.h2}>
-            {sprinting
+            {rushMode
+              ? `You beat ${G.bossesDefeated} boss${G.bossesDefeated === 1 ? "" : "es"}`
+              : zenMode
+              ? `${G.wordsTyped} word${G.wordsTyped === 1 ? "" : "s"}, nicely done`
+              : sprinting
               ? `${G.wordsTyped} word${G.wordsTyped === 1 ? "" : "s"} in ${SPRINT.seconds} seconds`
               : climbing
                 ? G.towerTop
@@ -2118,7 +3061,41 @@ export default function Game() {
                 : `You reached round ${G.round}`}
           </Text>
           <View style={s.results}>
-            {sprinting ? (
+            {mixMode ? (
+              <Result
+                c={c}
+                k="SCORE"
+                v={G.score.toLocaleString()}
+                note={isNewBest ? "New Mix best" : `Mix best ${mixBest.score.toLocaleString()}`}
+              />
+            ) : suddenMode ? (
+              <Result
+                c={c}
+                k="SCORE"
+                v={G.score.toLocaleString()}
+                note={isNewBest ? `New Sudden ${G.d.label} best` : `Sudden ${G.d.label} best ${suddenBest[G.d.id].toLocaleString()}`}
+              />
+            ) : rushMode ? (
+              <Result
+                c={c}
+                k="SCORE"
+                v={G.score.toLocaleString()}
+                note={isNewBest ? "New Boss Rush best" : `Best ${rushBest.bosses} bosses · ${rushBest.score.toLocaleString()}`}
+              />
+            ) : zenMode ? (
+              <Result
+                c={c}
+                k="SPEED"
+                v={`${zenWpm()} wpm`}
+                note={
+                  G.wordsTyped >= ZEN.minWordsForBest
+                    ? isNewBest
+                      ? "New Zen best"
+                      : `Zen best ${zenBest.wpm} wpm`
+                    : `${ZEN.minWordsForBest}+ words to set a best`
+                }
+              />
+            ) : sprinting ? (
               <Result
                 c={c}
                 k="SCORE"
@@ -2140,7 +3117,9 @@ export default function Game() {
                 note={isNewBest ? `New ${G.d.label} best` : `${G.d.label} best ${bestHere.toLocaleString()}`}
               />
             )}
-            {sprinting ? (
+            {zenMode ? (
+              <Result c={c} k="TIME" v={formatClock(zenSeconds())} />
+            ) : sprinting ? (
               <Result c={c} k="SPEED" v={`${liveWpm} wpm`} note={`Best ${Math.max(sprintBest.wpm, liveWpm)} wpm`} />
             ) : (
               <Result c={c} k="WORDS TYPED" v={String(G.wordsTyped)} />
@@ -2183,7 +3162,26 @@ export default function Game() {
                 That was today’s try. A new challenge unlocks in {timeUntilTomorrow()}.
                 {dailyStreak.count > 1 ? ` You're on a ${dailyStreak.count}-day streak.` : ""}
               </Text>
+              <View style={s.shareGrid} accessibilityLabel="Your rounds today as colored squares">
+                <Text style={s.shareGridText}>{dailyGrid(G.roundLog)}</Text>
+                <Text style={s.meta}>🟩 clean round · 🟨 1–2 slips · 🟧 3+ · 🟥 where you fell</Text>
+              </View>
               <Btn c={c} label="Share result" onPress={shareDaily} />
+              {!reminder.on && !reminder.asked && Platform.OS !== "web" && (
+                <View style={s.achNew}>
+                  <Text style={[s.ruleText, { fontFamily: fonts.bodyStrong }]}>
+                    Want a reminder when tomorrow’s challenge is ready?
+                  </Text>
+                  <View style={s.btnGrid}>
+                    <View style={s.btnHalf}>
+                      <Btn c={c} label="Remind me" onPress={() => updateReminder({ ...reminder, on: true, asked: true })} />
+                    </View>
+                    <View style={s.btnHalf}>
+                      <Btn c={c} label="No thanks" onPress={() => updateReminder({ ...reminder, asked: true })} secondary />
+                    </View>
+                  </View>
+                </View>
+              )}
               <Btn c={c} label="Main menu" onPress={toTitle} secondary />
             </>
           ) : (
@@ -2191,7 +3189,11 @@ export default function Game() {
               <Btn
                 c={c}
                 label={
-                  sprinting
+                  rushMode
+                    ? "Rush again"
+                    : zenMode
+                    ? "New session"
+                    : sprinting
                     ? "Sprint again"
                     : climbing
                       ? tower.checkpoint
@@ -2207,6 +3209,42 @@ export default function Game() {
         </Overlay>
       )}
 
+      {showPaywall && (
+        <Overlay c={c} pop={overlayPop}>
+          <View style={s.achHead}>
+            <View style={{ flex: 1, gap: 4 }}>
+              <Text style={[s.eyebrow, { color: c.gold }]}>TYPO TYRANT PRO</Text>
+              <Text style={s.h2}>Unlock everything</Text>
+            </View>
+            <Pressable style={s.chip} onPress={() => setShowPaywall(false)} hitSlop={10} accessibilityRole="button">
+              <Text style={s.chipText}>CLOSE</Text>
+            </Pressable>
+          </View>
+          <View style={{ gap: 10 }}>
+            {PRO.perks.map(perk => (
+              <View key={perk} style={s.proPerk}>
+                <View style={[s.achMark, { borderColor: c.gold, backgroundColor: c.gold }]}>
+                  <Text style={[s.achMarkText, { color: c.onAccent }]}>✓</Text>
+                </View>
+                <Text style={[s.ruleText, { flex: 1 }]}>{perk}</Text>
+              </View>
+            ))}
+          </View>
+          <Text style={s.body}>
+            Survival, Sprint, Zen and the Daily Challenge stay free forever. Without Pro you still get one free try of each Pro
+            mode every day.
+          </Text>
+          <Btn c={c} label={paywallBusy ? "One moment…" : `Unlock Pro · ${proPrice}`} onPress={purchasePro} />
+          <Btn c={c} label="Restore purchases" onPress={restore} secondary />
+          {paywallMsg ? <Text style={[s.slotEffect, { color: c.miss, textAlign: "center" }]}>{paywallMsg}</Text> : null}
+          {PURCHASES_TEST_MODE && (
+            <Text style={[s.slotEffect, { textAlign: "center" }]}>
+              Test mode: purchases aren’t connected yet, so unlocking is free on this development build.
+            </Text>
+          )}
+        </Overlay>
+      )}
+
       {/* "Achievement unlocked" toast: over everything, never blocks taps */}
       {toast && (
         <Animated.View
@@ -2215,6 +3253,8 @@ export default function Game() {
             s.toast,
             {
               top: insets.top + 6,
+              left: Math.max(18, (width - 480) / 2), // centered on wide screens
+              right: Math.max(18, (width - 480) / 2),
               opacity: toastAnim,
               transform: [{ translateY: toastAnim.interpolate({ inputRange: [0, 1], outputRange: [-30, 0] }) }],
             },
@@ -2282,6 +3322,10 @@ function StatsBody({
   unlockedCount,
   sprint,
   tower,
+  zen,
+  rush,
+  sudden,
+  mix,
 }: {
   c: Palette;
   life: LifetimeStats;
@@ -2290,6 +3334,10 @@ function StatsBody({
   unlockedCount: number;
   sprint: SprintBest;
   tower: TowerProgress;
+  zen: ZenBest;
+  rush: RushBest;
+  sudden: BestScores;
+  mix: MixBest;
 }) {
   const s = styles(c);
   const n = (v: number) => v.toLocaleString();
@@ -2333,6 +3381,21 @@ function StatsBody({
         ["SPRINT SPEED", sprint.wpm ? `${sprint.wpm} wpm` : "–"],
         ["TOWER BEST FLOOR", tower.best ? n(tower.best) : "–", tower.checkpoint ? `checkpoint ${tower.checkpoint}` : undefined],
         ["TOWER SUMMIT", tower.cleared ? "Reached" : "Not yet"],
+        ["ZEN SPEED", zen.wpm ? `${zen.wpm} wpm` : "–", zen.sessions ? `${n(zen.sessions)} sessions` : undefined],
+        ["LONGEST ZEN", zen.words ? `${n(zen.words)} words` : "–"],
+        [
+          "SUDDEN DEATH BEST",
+          (() => {
+            const top = Math.max(...DIFFICULTY_ORDER.map(id => sudden[id]));
+            return top ? n(top) : "–";
+          })(),
+          (() => {
+            const id = DIFFICULTY_ORDER.reduce((a, b) => (sudden[b] > sudden[a] ? b : a));
+            return sudden[id] ? `on ${DIFFICULTIES[id].label}` : undefined;
+          })(),
+        ],
+        ["MARATHON MIX BEST", mix.score ? n(mix.score) : "–", mix.round ? `round ${mix.round}` : undefined],
+        ["BOSS RUSH BEST", rush.bosses ? `${n(rush.bosses)} bosses` : "–", rush.score ? `${n(rush.score)} points` : undefined],
       ])}
       {section("ACCURACY", [
         ["ACCURACY", accuracy],
@@ -2359,6 +3422,7 @@ function ThemeCard({
   t,
   preview: p,
   open,
+  needsPro,
   selected,
   onPress,
 }: {
@@ -2366,6 +3430,7 @@ function ThemeCard({
   t: Theme;
   preview: Palette;
   open: boolean;
+  needsPro?: boolean; // earned, but using it needs Pro (tapping opens the Pro screen)
   selected: boolean;
   onPress: () => void;
 }) {
@@ -2373,11 +3438,11 @@ function ThemeCard({
   return (
     <Pressable
       onPress={onPress}
-      disabled={!open}
+      disabled={!open && !needsPro}
       style={[s.diffCard, { gap: 6 }, selected && { borderColor: c.accent, backgroundColor: c.accentSoft }]}
       accessibilityRole="radio"
       accessibilityState={{ selected, disabled: !open }}
-      accessibilityLabel={`${t.name} theme${open ? "" : `, locked. ${requirementText(t.requires)}`}`}
+      accessibilityLabel={`${themeName(t)} theme${open ? "" : `, locked. ${requirementText(t.requires)}`}`}
     >
       <View style={[s.themeSwatch, { backgroundColor: p.bg, borderColor: p.line, opacity: open ? 1 : 0.45 }]}>
         <Text style={[s.themeWord, { color: p.ink }]} allowFontScaling={false}>
@@ -2392,10 +3457,14 @@ function ThemeCard({
       </View>
       <Text style={[s.slotName, { color: selected ? c.accent : open ? c.ink : c.muted }]}>
         {open ? "" : "🔒 "}
-        {t.name}
+        {themeName(t)}
       </Text>
       {open ? (
-        <Text style={s.slotEffect}>{t.palette ? (selected ? "In use" : "Unlocked") : "Follows your phone"}</Text>
+        <Text style={s.slotEffect}>
+          {t.palette ? (selected ? "In use" : "Unlocked") : getLook() === "court" ? (selected ? "Default · in use" : "Default") : "Follows your phone"}
+        </Text>
+      ) : needsPro ? (
+        <Text style={[s.slotEffect, { color: c.gold }]}>Earned · needs Pro</Text>
       ) : (
         <Text style={s.slotEffect}>{requirementText(t.requires)}</Text>
       )}
@@ -2408,12 +3477,14 @@ function PackRow({
   c,
   p,
   open,
+  needsPro,
   selected,
   onPress,
 }: {
   c: Palette;
   p: WordPack;
   open: boolean;
+  needsPro?: boolean; // earned, but using it needs Pro (tapping opens the Pro screen)
   selected: boolean;
   onPress: () => void;
 }) {
@@ -2422,7 +3493,7 @@ function PackRow({
   return (
     <Pressable
       onPress={onPress}
-      disabled={!open}
+      disabled={!open && !needsPro}
       style={[s.achRow, selected && { borderColor: c.accent, backgroundColor: c.accentSoft }, !open && { opacity: 0.75 }]}
       accessibilityRole="radio"
       accessibilityState={{ selected, disabled: !open }}
@@ -2434,7 +3505,9 @@ function PackRow({
           {p.name}
           {p.words && open ? <Text style={s.achCount}>{`  ${p.words.length} words`}</Text> : null}
         </Text>
-        <Text style={s.slotEffect}>{open ? `${p.desc}${sample ? ` ${sample}` : ""}` : requirementText(p.requires)}</Text>
+        <Text style={[s.slotEffect, needsPro && { color: c.gold }]}>
+          {open ? `${p.desc}${sample ? ` ${sample}` : ""}` : needsPro ? "Earned · needs Pro" : requirementText(p.requires)}
+        </Text>
       </View>
       {selected && <Text style={s.achDate}>IN USE</Text>}
     </Pressable>
@@ -2518,7 +3591,7 @@ function DailyCard({
   if (record) {
     return (
       <View style={[s.dailyCard, s.dailyDone]} accessibilityLabel="Today's Daily Challenge is done">
-        <Text style={[s.label, { color: c.gold }]}>DAILY CHALLENGE · {prettyDate(today).toUpperCase()}</Text>
+        <Text style={[s.label, { color: c.gold }]}>{getLook() === "court" ? "ROYAL DECREE" : "DAILY CHALLENGE"} · {prettyDate(today).toUpperCase()}</Text>
         <Text style={s.dailyTitle}>
           {record.finished ? `${record.score.toLocaleString()} points · round ${record.round}` : "Today's try is used up"}
         </Text>
@@ -2536,7 +3609,7 @@ function DailyCard({
       accessibilityRole="button"
       accessibilityLabel="Play today's Daily Challenge"
     >
-      <Text style={[s.label, { color: c.gold }]}>DAILY CHALLENGE · {prettyDate(today).toUpperCase()}</Text>
+      <Text style={[s.label, { color: c.gold }]}>{getLook() === "court" ? "ROYAL DECREE" : "DAILY CHALLENGE"} · {prettyDate(today).toUpperCase()}</Text>
       <Text style={s.dailyTitle}>Play today’s challenge</Text>
       <Text style={s.slotEffect}>
         Same words for everyone today · Medium rules · one try{streakText}
@@ -2546,8 +3619,29 @@ function DailyCard({
 }
 
 /** Center of the top bar: the current combo multiplier and streak. */
-function ComboBadge({ c, streak, pop }: { c: Palette; streak: number; pop: Animated.Value }) {
+function ComboBadge({
+  c,
+  streak,
+  pop,
+  streakOnly,
+}: {
+  c: Palette;
+  streak: number;
+  pop: Animated.Value;
+  streakOnly?: boolean; // Zen: no score, so just show the streak
+}) {
   const s = styles(c);
+  if (streakOnly) {
+    return (
+      <View style={[s.stat, s.combo]} accessibilityLabel={`Streak ${streak}`}>
+        <Text style={s.label}>STREAK</Text>
+        <Animated.Text style={[s.value, { color: streak > 0 ? c.good : c.ghost, transform: [{ scale: pop }] }]}>
+          {streak}
+        </Animated.Text>
+        <Text style={s.hudMeta}>clean words</Text>
+      </View>
+    );
+  }
   const mult = comboMultiplier(streak);
   const next = nextComboTier(streak);
   const active = mult > 1;
@@ -2557,7 +3651,7 @@ function ComboBadge({ c, streak, pop }: { c: Palette; streak: number; pop: Anima
       <Animated.Text style={[s.value, { color: active ? c.gold : c.ghost, transform: [{ scale: pop }] }]}>
         ×{mult}
       </Animated.Text>
-      <Text style={s.meta} numberOfLines={1}>
+      <Text style={s.hudMeta} numberOfLines={1}>
         {next ? `${streak} · ${next.at - streak} to ×${next.mult}` : `${streak} · max`}
       </Text>
     </View>
@@ -2588,7 +3682,8 @@ function PowerUpTray({
 }) {
   const s = styles(c);
   const full = G.inventory.length >= REWARDS.bucketSize;
-  const canUse = G.phase === "playing";
+  const locked = G.mode === "mix" && !!G.twist && !!MIX_TWISTS[G.twist].lockPowerUps; // Unplugged
+  const canUse = G.phase === "playing" && !locked;
   const slowLeft = G.slowWords + (G.wordLimit > G.limit && G.phase !== "banner" ? 1 : 0);
   const active: { text: string; color: string }[] = [];
   if (G.frozen) active.push({ text: "Frozen", color: c.ice });
@@ -2597,6 +3692,74 @@ function PowerUpTray({
   if (G.phoenix) active.push({ text: "Phoenix ready", color: c.gold });
   if (G.doubleWords > 0) active.push({ text: `2× points · ${G.doubleWords} word${G.doubleWords > 1 ? "s" : ""}`, color: c.gold });
   if (G.tripleWords > 0) active.push({ text: `3× points · ${G.tripleWords} word${G.tripleWords > 1 ? "s" : ""}`, color: c.gold });
+
+  // Royal Court: one row of cards (the gold bonus joins it), no header.
+  if (getLook() === "court") {
+    const card = (key: string, name: string, effect: string, color: string, onPress: () => void, label: string, bonus = false) => (
+      <Pressable
+        key={key}
+        onPress={onPress}
+        disabled={!canUse}
+        style={({ pressed }) => [
+          s.courtCard,
+          { borderColor: color, opacity: canUse ? 1 : 0.5 },
+          bonus && { backgroundColor: withAlpha(c.gold, 0.12) },
+          pressed && { transform: [{ scale: 0.96 }] },
+        ]}
+        accessibilityRole="button"
+        accessibilityLabel={label}
+      >
+        <Text style={[s.courtCardName, { color }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
+          {name}
+        </Text>
+        <Text style={s.courtCardEffect} numberOfLines={2}>
+          {effect}
+        </Text>
+      </Pressable>
+    );
+    return (
+      <View style={s.tray}>
+        <View style={s.slots}>
+          {Array.from({ length: REWARDS.bucketSize }, (_, i) => {
+            const id = G.inventory[i];
+            if (!id)
+              return (
+                <View key={i} style={[s.courtCard, s.slotEmpty]}>
+                  <Text style={s.slotEmptyText}>{full ? "" : "Empty"}</Text>
+                </View>
+              );
+            return card(
+              String(i),
+              POWERUPS[id].name,
+              POWERUPS[id].effect.toLowerCase(),
+              powerUpColor(c, id),
+              () => onUse(i),
+              `Use ${POWERUPS[id].name}: ${POWERUPS[id].effect}`,
+            );
+          })}
+          {G.bonus &&
+            card(
+              "bonus",
+              BONUS_POWERUPS[G.bonus].name,
+              "gold bonus",
+              c.gold,
+              onUseBonus,
+              `Use bonus ${BONUS_POWERUPS[G.bonus].name}: ${BONUS_POWERUPS[G.bonus].effect}`,
+              true,
+            )}
+        </View>
+        {active.length > 0 && (
+          <View style={s.activeRow}>
+            {active.map(a => (
+              <View key={a.text} style={[s.activeChip, { borderColor: a.color }]}>
+                <Text style={[s.activeText, { color: a.color }]}>{a.text}</Text>
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    );
+  }
 
   return (
     <View style={s.tray}>
@@ -2681,15 +3844,18 @@ function DifficultyCard({
   best,
   selected,
   onPress,
+  livesOverride,
 }: {
   c: Palette;
   d: Difficulty;
   best: number;
   selected: boolean;
   onPress: () => void;
+  livesOverride?: number; // Sudden Death: every difficulty has one life
 }) {
   const s = styles(c);
-  const health = d.lives === 1 ? "No Lives" : `${d.lives} lives`;
+  const lives = livesOverride ?? d.lives;
+  const health = lives === 1 ? (livesOverride ? "1 life" : "No Lives") : `${lives} lives`;
   return (
     <Pressable
       onPress={onPress}
@@ -2732,6 +3898,70 @@ function maxLettersAt(availWidth: number, glyphPerPx: number) {
 }
 
 /** Seconds left on the clock, ticking on its own so the whole game doesn't re-render. */
+/** The Daily share grid: one square per round, 10 to a line. */
+function dailyGrid(log: number[]): string {
+  const squares = log.map(m => (m < 0 ? "🟥" : m === 0 ? "🟩" : m <= 2 ? "🟨" : "🟧"));
+  const rows: string[] = [];
+  for (let i = 0; i < squares.length; i += 10) rows.push(squares.slice(i, i + 10).join(""));
+  return rows.join("\n");
+}
+
+/** Scrambled: the word's letters shuffled, never left in their real order (when that's possible). */
+function scrambleWord(word: string, random: () => number): string {
+  if (new Set(word).size < 2) return word;
+  for (let tries = 0; tries < 8; tries++) {
+    const a = [...word];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    const out = a.join("");
+    if (out !== word) return out;
+  }
+  return [...word].reverse().join("");
+}
+
+/** Marathon Mix: the twist's effects as short chips ("Points ×1.5", "Misses cost 2 lives"). */
+function twistChips(t: (typeof MIX_TWISTS)[MixTwistId]): { text: string; bad: boolean }[] {
+  const chips: { text: string; bad: boolean }[] = [];
+  if (t.pointsFactor !== 1) chips.push({ text: `Points ×${t.pointsFactor}`, bad: t.pointsFactor < 1 });
+  if (t.timeFactor !== 1)
+    chips.push({
+      text: t.timeFactor < 1 ? `${Math.round((1 - t.timeFactor) * 100)}% less time` : `${Math.round((t.timeFactor - 1) * 100)}% more time`,
+      bad: t.timeFactor < 1,
+    });
+  if (t.missCost > 1) chips.push({ text: `Misses cost ${t.missCost} lives`, bad: true });
+  if (t.bossHpFactor > 1) chips.push({ text: `Boss health ×${t.bossHpFactor}`, bad: true });
+  if (t.lengths) chips.push({ text: `${t.lengths[0]}–${t.lengths[1]} letter words`, bad: true });
+  if (t.backwards) chips.push({ text: "Words reversed", bad: true });
+  if (t.vanish) chips.push({ text: "Words vanish", bad: true });
+  if (t.masked) chips.push({ text: "Letters hidden", bad: true });
+  if (t.scramble) chips.push({ text: "Letters jumbled", bad: true });
+  if (t.shrinkPerWord) chips.push({ text: "Clock shrinks each word", bad: true });
+  if (t.lockPowerUps) chips.push({ text: "Power-ups locked", bad: true });
+  if (t.startShields) chips.push({ text: `+${t.startShields} free Shields`, bad: false });
+  if (t.powerUpEvery) chips.push({ text: `Power-up every ${t.powerUpEvery} words`, bad: false });
+  if (t.healOnFlawless) chips.push({ text: "Clean words heal", bad: false });
+  if (!chips.length) chips.push({ text: "Normal rules", bad: false });
+  return chips;
+}
+
+/** "2:05" */
+function formatClock(seconds: number): string {
+  const s = Math.floor(seconds);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Zen: time spent typing, ticking on its own. */
+function ZenTimer({ seconds, style }: { seconds: () => number; style: object }) {
+  const [, setT] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setT(t => t + 1), 500);
+    return () => clearInterval(id);
+  }, []);
+  return <Text style={[style, { fontVariant: ["tabular-nums"] }]}>{formatClock(seconds())}</Text>;
+}
+
 function Remaining({ G, style }: { G: GameState; style: object }) {
   const [, setT] = useState(0);
   useEffect(() => {
@@ -2842,32 +4072,56 @@ function Btn({
       ]}
       accessibilityRole="button"
     >
-      <Text style={[s.btnText, secondary && { color: c.ink }]}>{label}</Text>
+      <Text style={[s.btnText, secondary && { color: c.ink }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
 
 /* ---------- styles ---------- */
 
-const cache = new Map<Palette, ReturnType<typeof make>>();
+const cache = new Map<string, Map<Palette, ReturnType<typeof make>>>();
 function styles(c: Palette) {
-  let v = cache.get(c);
-  if (!v) cache.set(c, (v = make(c)));
+  const look = getLook();
+  let byPalette = cache.get(look);
+  if (!byPalette) cache.set(look, (byPalette = new Map()));
+  let v = byPalette.get(c);
+  if (!v) byPalette.set(c, (v = make(c)));
   return v;
 }
 
 function make(c: Palette) {
+  // Royal Court: carved serif titles and labels, squarer corners, gold trim, chunky primary buttons.
+  const court = getLook() === "court";
+  const F = court ? courtFonts : fonts;
+  const R = court ? 6 : 12; // card corners
+  const pill = court ? 6 : 999; // chip corners
+  const trim = court ? withAlpha(c.gold, 0.45) : c.line;
+  const caps = court ? courtFonts.displayMedium : fonts.bodyStrong; // small labels
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: c.bg, paddingHorizontal: 18 },
     hud: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end", gap: 8 },
     combo: { alignItems: "center", flexShrink: 1 },
     stat: { gap: 2 },
-    label: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1.3, color: c.muted },
-    value: { fontFamily: fonts.display, fontSize: 30, lineHeight: 34, color: c.ink, fontVariant: ["tabular-nums"] },
+    label: { fontFamily: caps, fontSize: 11, letterSpacing: court ? 1.8 : 1.3, color: c.muted },
+    value: { fontFamily: F.display, fontSize: court ? 24 : 30, lineHeight: court ? 30 : 34, color: c.ink, fontVariant: ["tabular-nums"] },
     meta: { fontFamily: fonts.body, fontSize: 13, color: c.muted },
+    hudMeta: court ? { display: "none" } : { fontFamily: fonts.body, fontSize: 13, color: c.muted },
     livesRow: { marginTop: 14, alignItems: "center", gap: 6 },
     pips: { flexDirection: "row", gap: 5 },
-    pip: { width: 22, height: 16, borderRadius: 3 },
+    pip: court
+      ? {
+          width: 17,
+          height: 21,
+          borderTopLeftRadius: 3,
+          borderTopRightRadius: 3,
+          borderBottomLeftRadius: 9,
+          borderBottomRightRadius: 9,
+          borderWidth: 1.5,
+          borderColor: c.gold, // shields
+        }
+      : { width: 22, height: 16, borderRadius: 3 },
 
     stage: { flex: 1, alignItems: "center", justifyContent: "center", gap: 28 },
     wordWrap: { alignItems: "center", justifyContent: "flex-end" },
@@ -2875,10 +4129,12 @@ function make(c: Palette) {
     letterBox: { alignItems: "center", borderRadius: 8, paddingHorizontal: 1 },
     letter: { fontFamily: fonts.word, includeFontPadding: false },
     underline: { alignSelf: "stretch", marginHorizontal: "8%", borderRadius: 2, marginTop: 2 },
-    float: { position: "absolute", top: -34, width: 340, textAlign: "center", fontFamily: fonts.display, fontSize: 22 },
+    float: { position: "absolute", top: -34, width: 340, textAlign: "center", fontFamily: F.display, fontSize: 22 },
 
     fuse: { width: "100%", maxWidth: 560, gap: 8 },
-    fuseTrack: { height: 10, borderRadius: 999, backgroundColor: c.line, overflow: "hidden" },
+    fuseTrack: court
+      ? { height: 12, borderRadius: 6, backgroundColor: c.line, borderWidth: 1, borderColor: trim, overflow: "hidden" }
+      : { height: 10, borderRadius: 999, backgroundColor: c.line, overflow: "hidden" },
     fuseFill: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, borderRadius: 999, transformOrigin: "left" },
     fuseHot: {},
     fuseRow: { flexDirection: "row", justifyContent: "space-between" },
@@ -2888,18 +4144,18 @@ function make(c: Palette) {
     dailyCard: {
       borderWidth: 1.5,
       borderColor: c.gold,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 12,
       paddingVertical: 10,
       gap: 3,
       backgroundColor: c.surface,
     },
     dailyDone: { borderStyle: "dashed", backgroundColor: "transparent" },
-    dailyTitle: { fontFamily: fonts.display, fontSize: 19, color: c.ink },
+    dailyTitle: { fontFamily: F.display, fontSize: 19, color: c.ink },
     bonusSlot: {
       borderWidth: 1.5,
       borderColor: c.gold,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 10,
       paddingVertical: 6,
       backgroundColor: c.surface,
@@ -2907,16 +4163,54 @@ function make(c: Palette) {
     },
     bonusRow: { flexDirection: "row", alignItems: "baseline", gap: 8 },
     bonusEmpty: { borderStyle: "dashed", backgroundColor: "transparent", alignItems: "center", paddingVertical: 8 },
-    bossBar: { marginTop: 14, gap: 6, alignItems: "center" },
+    bossBar: court
+      ? {
+          marginTop: 12,
+          gap: 8,
+          alignItems: "center",
+          padding: 12,
+          borderWidth: 1,
+          borderColor: trim,
+          borderRadius: 8,
+          backgroundColor: c.surface,
+        }
+      : { marginTop: 14, gap: 6, alignItems: "center" },
+    courtCard: {
+      flex: 1,
+      minHeight: 60,
+      borderWidth: 1,
+      borderRadius: 8,
+      backgroundColor: c.surface,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 4,
+      paddingVertical: 8,
+      gap: 2,
+    },
+    courtCardName: { fontFamily: courtFonts.displayMedium, fontSize: 13, textAlign: "center" },
+    courtCardEffect: { fontFamily: fonts.body, fontSize: 10, lineHeight: 13, color: c.muted, textAlign: "center" },
+    courtBossName: { fontFamily: courtFonts.display, fontSize: 22, color: c.ink, textAlign: "center" },
+    courtRound: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: trim,
+      alignItems: "center",
+      justifyContent: "center",
+    },
     bossHpRow: { flexDirection: "row", gap: 6, alignSelf: "stretch", justifyContent: "center" },
-    bossHpSeg: { flex: 1, maxWidth: 70, height: 10, borderRadius: 3 },
+    bossArmored: { borderWidth: 2, borderRadius: 8, padding: 4, gap: 4 },
+    bossCrack: { position: "absolute", right: 0, top: 0, bottom: 0 },
+    bossHpSeg: { flex: 1, maxWidth: 70, height: 10, borderRadius: 3, overflow: "hidden" },
     bossName: {
-      fontFamily: fonts.display,
+      fontFamily: F.display,
       fontSize: 44,
       lineHeight: 48,
       color: c.ink,
       textAlign: "center",
-      letterSpacing: -1,
+      letterSpacing: court ? 0.5 : -1,
       paddingHorizontal: 12,
     },
     trayHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", gap: 10 },
@@ -2925,7 +4219,7 @@ function make(c: Palette) {
       flex: 1,
       minHeight: 56,
       borderWidth: 1.5,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 8,
       paddingVertical: 7,
       backgroundColor: c.surface,
@@ -2933,14 +4227,14 @@ function make(c: Palette) {
     },
     slotEmpty: { borderStyle: "dashed", borderColor: c.line, backgroundColor: "transparent", alignItems: "center", justifyContent: "center" },
     slotEmptyText: { fontFamily: fonts.body, fontSize: 12, color: c.ghost },
-    slotName: { fontFamily: fonts.display, fontSize: 15 },
+    slotName: { fontFamily: F.display, fontSize: 15 },
     slotEffect: { fontFamily: fonts.body, fontSize: 11, lineHeight: 14, color: c.muted },
     activeRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-    activeChip: { borderWidth: 1, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 },
+    activeChip: { borderWidth: 1, borderRadius: pill, paddingHorizontal: 8, paddingVertical: 2 },
     activeText: { fontFamily: fonts.bodyStrong, fontSize: 11 },
     controls: { flexDirection: "row", justifyContent: "center", gap: 10 },
-    chip: { borderWidth: 1, borderColor: c.line, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 6 },
-    chipText: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1, color: c.muted },
+    chip: { borderWidth: 1, borderColor: trim, borderRadius: pill, paddingHorizontal: 12, paddingVertical: 6 },
+    chipText: { fontFamily: caps, fontSize: 11, letterSpacing: court ? 1.4 : 1, color: c.muted },
 
     hiddenInput: { position: "absolute", width: 1, height: 1, opacity: 0, left: -10, top: 0 },
     // Wide enough that the sample is never clipped; parked above the screen.
@@ -2952,9 +4246,9 @@ function make(c: Palette) {
       width: "100%",
       maxWidth: 520,
       backgroundColor: c.surface,
-      borderRadius: 18,
-      borderWidth: 1,
-      borderColor: c.line,
+      borderRadius: court ? 10 : 18,
+      borderWidth: court ? 1.5 : 1,
+      borderColor: trim,
       maxHeight: "100%",
       overflow: "hidden",
     },
@@ -2963,20 +4257,22 @@ function make(c: Palette) {
     diffCard: {
       width: "48.5%",
       borderWidth: 1.5,
-      borderColor: c.line,
-      borderRadius: 12,
+      borderColor: trim,
+      borderRadius: R,
       paddingHorizontal: 12,
       paddingVertical: 10,
       gap: 2,
     },
-    diffLabel: { fontFamily: fonts.display, fontSize: 19, color: c.ink },
+    diffLabel: { fontFamily: F.display, fontSize: 19, color: c.ink },
     diffDetail: { fontFamily: fonts.bodyStrong, fontSize: 12, color: c.ink, fontVariant: ["tabular-nums"] },
     diffWords: { fontFamily: fonts.body, fontSize: 12, lineHeight: 16, color: c.muted },
     diffBest: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.good, marginTop: 2 },
-    btnSecondary: { backgroundColor: "transparent", borderWidth: 1, borderColor: c.line },
-    eyebrow: { fontFamily: fonts.bodyStrong, fontSize: 11, letterSpacing: 1.6, color: c.accent },
-    h1: { fontFamily: fonts.display, fontSize: 48, lineHeight: 50, color: c.ink, letterSpacing: -1 },
-    h2: { fontFamily: fonts.display, fontSize: 34, lineHeight: 38, color: c.ink, letterSpacing: -0.5 },
+    btnSecondary: { backgroundColor: "transparent", borderWidth: 1, borderColor: trim, borderBottomWidth: 1, borderBottomColor: trim },
+    eyebrow: { fontFamily: caps, fontSize: 11, letterSpacing: court ? 2.4 : 1.6, color: c.accent },
+    h1: court
+      ? { fontFamily: F.display, fontSize: 40, lineHeight: 46, color: c.gold, letterSpacing: 2, textAlign: "center" }
+      : { fontFamily: F.display, fontSize: 48, lineHeight: 50, color: c.ink, letterSpacing: -1 },
+    h2: { fontFamily: F.display, fontSize: court ? 30 : 34, lineHeight: 38, color: c.ink, letterSpacing: court ? 0.5 : -0.5 },
     body: { fontFamily: fonts.body, fontSize: 15, lineHeight: 22, color: c.muted },
     demo: { fontFamily: fonts.word, fontSize: 30 },
     rule: { flexDirection: "row", gap: 12 },
@@ -2984,10 +4280,23 @@ function make(c: Palette) {
     ruleText: { flex: 1, fontFamily: fonts.body, fontSize: 14, lineHeight: 20, color: c.ink },
     results: { flexDirection: "row", flexWrap: "wrap", rowGap: 14 },
     result: { width: "50%", gap: 2 },
-    btn: { backgroundColor: c.accent, borderRadius: 12, paddingVertical: 15, alignItems: "center" },
-    btnText: { fontFamily: fonts.bodyStrong, fontSize: 16, color: c.onAccent },
+    btn: court
+      ? {
+          backgroundColor: c.accent,
+          borderRadius: R,
+          paddingVertical: 14,
+          alignItems: "center",
+          borderWidth: 1,
+          borderColor: "rgba(0, 0, 0, 0.25)",
+          borderBottomWidth: 5, // a chunky, pressable edge
+          borderBottomColor: "rgba(0, 0, 0, 0.4)",
+        }
+      : { backgroundColor: c.accent, borderRadius: R, paddingVertical: 15, alignItems: "center" },
+    btnText: court
+      ? { fontFamily: courtFonts.display, fontSize: 15, letterSpacing: 1.2, color: c.onAccent }
+      : { fontFamily: fonts.bodyStrong, fontSize: 16, color: c.onAccent },
 
-    setGroup: { borderWidth: 1, borderColor: c.line, borderRadius: 12, paddingHorizontal: 12, marginTop: -6 },
+    setGroup: { borderWidth: 1, borderColor: trim, borderRadius: R, paddingHorizontal: 12, marginTop: -6 },
     setRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 11 },
     modeButton: {
       flexDirection: "row",
@@ -2996,18 +4305,35 @@ function make(c: Palette) {
       borderWidth: 1.5,
       borderColor: c.accent,
       backgroundColor: c.accentSoft,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 12,
       paddingVertical: 10,
       marginTop: -6,
     },
-    modeCard: { borderWidth: 1.5, borderColor: c.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, gap: 2 },
-    towerCard: { borderWidth: 1.5, borderColor: c.line, borderRadius: 12, padding: 12, gap: 8 },
+    modeCard: { borderWidth: 1.5, borderColor: trim, borderRadius: R, paddingHorizontal: 12, paddingVertical: 10, gap: 2 },
+    towerCard: { borderWidth: 1.5, borderColor: trim, borderRadius: R, padding: 12, gap: 8 },
     towerTrack: { height: 10, borderRadius: 999, backgroundColor: c.bg, overflow: "hidden", justifyContent: "center" },
     towerFill: { position: "absolute", left: 0, top: 0, bottom: 0, borderRadius: 999 },
     towerMark: { position: "absolute", width: 2, height: 10, marginLeft: -2 },
     btnGrid: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", rowGap: 10 },
     btnHalf: { width: "48.5%" },
+    proBadge: {
+      fontFamily: fonts.bodyStrong,
+      fontSize: 10,
+      letterSpacing: 1,
+      color: c.onAccent,
+      backgroundColor: c.gold,
+      borderRadius: 4,
+      paddingHorizontal: 5,
+      paddingVertical: 1,
+      overflow: "hidden",
+    },
+    proLine: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: -6 },
+    proCta: { borderWidth: 1.5, borderColor: c.gold, borderRadius: R, padding: 12, gap: 3, backgroundColor: c.surface },
+    proPerk: { flexDirection: "row", alignItems: "center", gap: 10 },
+    shareGrid: { alignItems: "center", gap: 6, paddingVertical: 4 },
+    shareGridText: { fontSize: 22, lineHeight: 28, textAlign: "center", letterSpacing: 2 },
+    twistCard: { padding: 22, gap: 12, borderColor: c.gold, borderWidth: 1.5 },
     themeSwatch: {
       borderWidth: 1,
       borderRadius: 8,
@@ -3027,16 +4353,16 @@ function make(c: Palette) {
       gap: 10,
       borderWidth: 1,
       borderColor: c.line,
-      borderRadius: 12,
+      borderRadius: R,
       paddingHorizontal: 10,
       paddingVertical: 8,
     },
-    achMark: { width: 24, height: 24, borderRadius: 12, borderWidth: 1.5, alignItems: "center", justifyContent: "center" },
+    achMark: { width: 24, height: 24, borderRadius: R, borderWidth: 1.5, alignItems: "center", justifyContent: "center" },
     achMarkText: { fontFamily: fonts.bodyStrong, fontSize: 13, lineHeight: 16 },
     achBarRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 3 },
     achCount: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.muted, fontVariant: ["tabular-nums"] },
     achDate: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.gold },
-    achNew: { borderWidth: 1.5, borderColor: c.gold, borderRadius: 12, padding: 10, gap: 3 },
+    achNew: { borderWidth: 1.5, borderColor: c.gold, borderRadius: R, padding: 10, gap: 3 },
     toast: {
       position: "absolute",
       left: 18,
@@ -3056,11 +4382,12 @@ function make(c: Palette) {
       shadowOffset: { width: 0, height: 4 },
       elevation: 8,
     },
-    toastName: { fontFamily: fonts.display, fontSize: 20, color: c.ink },
+    toastName: { fontFamily: F.display, fontSize: 20, color: c.ink },
     bannerWrap: { alignItems: "center", justifyContent: "center", backgroundColor: c.scrim },
     banner: { alignItems: "center", gap: 6 },
-    bannerBig: { fontFamily: fonts.display, fontSize: 110, lineHeight: 112, color: c.ink, letterSpacing: -3 },
+    bannerBig: { fontFamily: F.display, fontSize: court ? 96 : 110, lineHeight: 112, color: c.ink, letterSpacing: court ? 0 : -3 },
     bannerSub: { fontFamily: fonts.body, fontSize: 15, color: c.muted },
     bannerNote: { fontFamily: fonts.bodyStrong, fontSize: 14, color: c.accent },
+
   });
 }

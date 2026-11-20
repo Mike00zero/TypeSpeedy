@@ -3,7 +3,7 @@
  * Some are about a single game ("reach round 10"), some add up across every game ("type 500 words").
  */
 import { DIFFICULTY_ORDER, type DifficultyId } from "./config";
-import type { GameMode } from "./modes";
+import { MIX, type GameMode } from "./modes";
 
 /** What happened in the current game so far. */
 export type RunStats = {
@@ -34,6 +34,9 @@ export type RunStats = {
   startFloor: number;
   floorCleared: number; // highest floor cleared this climb (0 = none)
   towerTop: boolean; // cleared floor 100 this climb
+  wpm: number; // words per minute this game (Sprint and Zen)
+  giantBosses: number; // Marathon Mix: Giant Bosses beaten
+  twistsSeen: number; // Marathon Mix: different twists played this game
 };
 
 /** Totals and records across every finished game (shown on the Stats screen). */
@@ -104,6 +107,9 @@ export function emptyRun(difficulty: DifficultyId = "medium"): RunStats {
     startFloor: 1,
     floorCleared: 0,
     towerTop: false,
+    wpm: 0,
+    giantBosses: 0,
+    twistsSeen: 0,
   };
 }
 
@@ -126,7 +132,8 @@ export function addRun(life: LifetimeStats, run: RunStats | null): LifetimeStats
     keys: life.keys + run.keys,
     goodKeys: life.goodKeys + run.goodKeys,
     typingSeconds: life.typingSeconds + run.typingSeconds,
-    bestRound: run.mode === "classic" ? Math.max(life.bestRound, run.round) : life.bestRound, // floors aren't rounds
+    bestRound:
+      run.mode === "classic" || run.mode === "sudden" ? Math.max(life.bestRound, run.round) : life.bestRound, // floors aren't rounds
     bestStreak: Math.max(life.bestStreak, run.bestStreak),
     fastest: faster,
     perfectRounds: life.perfectRounds + run.perfectRounds,
@@ -153,6 +160,10 @@ export type AchievementGroup =
   | "Difficulty"
   | "Tower"
   | "Sprint"
+  | "Zen"
+  | "Boss Rush"
+  | "Sudden Death"
+  | "Marathon Mix"
   | "Daily"
   | "Career";
 
@@ -167,6 +178,10 @@ export const ACHIEVEMENT_GROUPS: AchievementGroup[] = [
   "Difficulty",
   "Tower",
   "Sprint",
+  "Zen",
+  "Boss Rush",
+  "Sudden Death",
+  "Marathon Mix",
   "Daily",
   "Career",
 ];
@@ -185,9 +200,16 @@ export type Achievement = {
 const goal = (cur: number, target: number): [number, number] => [Math.min(cur, target), target];
 const yes = (ok: boolean): [number, number] => [ok ? 1 : 0, 1];
 // Being on round N means N-1 rounds were cleared. Survival only: Tower floors aren't rounds.
-const reachedRound = (r: RunStats) => (r.mode === "classic" ? r.round : 0);
-const survival = (r: RunStats) => r.mode === "classic";
+// Sudden Death is Survival with one life, so it counts as Survival here.
+const survival = (r: RunStats) => r.mode === "classic" || r.mode === "sudden";
+const reachedRound = (r: RunStats) => (survival(r) ? r.round : 0);
 const sprint = (r: RunStats) => (r.mode === "sprint" ? r.wordsTyped : 0); // words finished in this Sprint
+const zen = (r: RunStats) => (r.mode === "zen" ? r.wordsTyped : 0);
+const rush = (r: RunStats) => (r.mode === "rush" ? r.bossesDefeated : 0);
+// "In one game" boss goals are for Survival, where every boss takes a whole round to reach.
+const survivalBosses = (r: RunStats) => (survival(r) ? r.bossesDefeated : 0);
+const sudden = (r: RunStats) => (r.mode === "sudden" ? r.round : 0); // round reached in Sudden Death
+const mix = (r: RunStats) => (r.mode === "mix" ? r.round : 0);
 const tower = (r: RunStats, floorsCleared: number) => r.mode === "tower" && r.floorCleared >= floorsCleared;
 
 export const ACHIEVEMENTS: Achievement[] = [
@@ -197,10 +219,10 @@ export const ACHIEVEMENTS: Achievement[] = [
   { id: "first_powerup", name: "Powered Up", desc: "Use a power-up.", group: "Getting started", progress: x => yes(x.run.powerUpsUsed >= 1) },
 
   // Score in one game
-  { id: "score_10k", name: "Five Digits", desc: "Score 10,000 points in one game.", group: "Score", progress: x => goal(x.run.score, 10000) },
-  { id: "score_30k", name: "High Scorer", desc: "Score 30,000 points in one game.", group: "Score", progress: x => goal(x.run.score, 30000) },
-  { id: "score_75k", name: "Hall of Fame", desc: "Score 75,000 points in one game.", group: "Score", progress: x => goal(x.run.score, 75000) },
-  { id: "score_150k", name: "Legend", desc: "Score 150,000 points in one game.", group: "Score", progress: x => goal(x.run.score, 150000) },
+  { id: "score_10k", name: "Five Digits", desc: "Score 10,000 points in one Survival game.", group: "Score", progress: x => goal(survival(x.run) ? x.run.score : 0, 10000) },
+  { id: "score_30k", name: "High Scorer", desc: "Score 30,000 points in one Survival game.", group: "Score", progress: x => goal(survival(x.run) ? x.run.score : 0, 30000) },
+  { id: "score_75k", name: "Hall of Fame", desc: "Score 75,000 points in one Survival game.", group: "Score", progress: x => goal(survival(x.run) ? x.run.score : 0, 75000) },
+  { id: "score_150k", name: "Legend", desc: "Score 150,000 points in one Survival game.", group: "Score", progress: x => goal(survival(x.run) ? x.run.score : 0, 150000) },
 
   // Rounds
   { id: "round_10", name: "Double Digits", desc: "Reach round 10.", group: "Rounds", progress: x => goal(reachedRound(x.run), 10) },
@@ -220,9 +242,9 @@ export const ACHIEVEMENTS: Achievement[] = [
 
   // Bosses
   { id: "boss_clutch", name: "Clutch", desc: "Beat a boss with only one life left.", group: "Bosses", progress: x => yes(x.run.clutchBosses >= 1) },
-  { id: "boss_untouched_5", name: "Untouchable", desc: "Beat 5 bosses with no wrong letters or timeouts in one game.", group: "Bosses", progress: x => goal(x.run.flawlessBosses, 5) },
-  { id: "boss_20", name: "Boss Hunter", desc: "Beat 20 bosses in one game.", group: "Bosses", progress: x => goal(x.run.bossesDefeated, 20) },
-  { id: "boss_35", name: "Boss Rush", desc: "Beat 35 bosses in one game.", group: "Bosses", progress: x => goal(x.run.bossesDefeated, 35) },
+  { id: "boss_untouched_5", name: "Untouchable", desc: "Beat 5 bosses with no wrong letters or timeouts in one Survival game.", group: "Bosses", progress: x => goal(survival(x.run) ? x.run.flawlessBosses : 0, 5) },
+  { id: "boss_20", name: "Boss Hunter", desc: "Beat 20 bosses in one Survival game.", group: "Bosses", progress: x => goal(survivalBosses(x.run), 20) },
+  { id: "boss_35", name: "Boss Marathon", desc: "Beat 35 bosses in one Survival game.", group: "Bosses", progress: x => goal(survivalBosses(x.run), 35) },
   { id: "boss_total_250", name: "Boss Collector", desc: "Beat 250 bosses in total.", group: "Bosses", progress: x => goal(x.life.bosses, 250), showProgress: true },
 
   // Speed and accuracy
@@ -248,7 +270,7 @@ export const ACHIEVEMENTS: Achievement[] = [
   { id: "tower_10", name: "Base Camp", desc: "Reach the first Tower checkpoint (clear floor 10).", group: "Tower", progress: x => yes(tower(x.run, 10)) },
   { id: "tower_50", name: "Halfway Up", desc: "Clear floor 50 of the Tower.", group: "Tower", progress: x => yes(tower(x.run, 50)) },
   { id: "tower_80", name: "Thin Air", desc: "Clear floor 80 of the Tower.", group: "Tower", progress: x => yes(tower(x.run, 80)) },
-  { id: "tower_top", name: "Summit", desc: "Reach the top of the Tower and unlock the Phoenix Feather.", group: "Tower", progress: x => yes(x.run.towerTop) },
+  { id: "tower_top", name: "Summit", desc: "Defeat the Typo Tyrant at the top of the Tower.", group: "Tower", progress: x => yes(x.run.towerTop) },
   { id: "tower_free_solo", name: "Free Solo", desc: "Climb all 100 floors in one go, starting from floor 1.", group: "Tower", progress: x => yes(x.run.towerTop && x.run.startFloor === 1) },
 
   // Sprint (60 seconds)
@@ -256,6 +278,29 @@ export const ACHIEVEMENTS: Achievement[] = [
   { id: "sprint_35", name: "Sprinter", desc: "Finish 35 words in one Sprint.", group: "Sprint", progress: x => goal(sprint(x.run), 35) },
   { id: "sprint_50", name: "Photo Finish", desc: "Finish 50 words in one Sprint.", group: "Sprint", progress: x => goal(sprint(x.run), 50) },
   { id: "sprint_clean", name: "Clean Run", desc: "Finish 25 words in a Sprint without a single wrong letter.", group: "Sprint", progress: x => yes(sprint(x.run) >= 25 && x.run.keys === x.run.goodKeys) },
+
+  // Zen (no clock, no lives)
+  { id: "zen_100", name: "Zen Master", desc: "Finish 100 words in one Zen session.", group: "Zen", progress: x => goal(zen(x.run), 100) },
+  { id: "zen_mindful", name: "Mindful", desc: "Finish 50 words in a Zen session without a single wrong letter.", group: "Zen", progress: x => yes(zen(x.run) >= 50 && x.run.keys === x.run.goodKeys) },
+  { id: "zen_flow", name: "In the Flow", desc: "Average 60 words per minute over a Zen session of 50+ words.", group: "Zen", progress: x => yes(x.run.over && zen(x.run) >= 50 && x.run.wpm >= 60) },
+
+  // Boss Rush
+  { id: "rush_5", name: "Rush Hour", desc: "Beat 5 bosses in one Boss Rush.", group: "Boss Rush", progress: x => goal(rush(x.run), 5) },
+  { id: "rush_15", name: "Gauntlet", desc: "Beat 15 bosses in one Boss Rush.", group: "Boss Rush", progress: x => goal(rush(x.run), 15) },
+  { id: "rush_30", name: "Boss Slayer Supreme", desc: "Beat 30 bosses in one Boss Rush.", group: "Boss Rush", progress: x => goal(rush(x.run), 30) },
+  { id: "rush_flawless_5", name: "Untouched Rush", desc: "Beat 5 bosses in a Boss Rush without a wrong letter or timeout.", group: "Boss Rush", progress: x => yes(x.run.mode === "rush" && x.run.flawlessBosses >= 5 && x.run.flawlessBosses === x.run.bossesDefeated) },
+
+  // Sudden Death (one life)
+  { id: "sudden_r5", name: "Living Dangerously", desc: "Reach round 5 in Sudden Death.", group: "Sudden Death", progress: x => goal(sudden(x.run), 5) },
+  { id: "sudden_r10", name: "Nerves of Steel", desc: "Reach round 10 in Sudden Death.", group: "Sudden Death", progress: x => goal(sudden(x.run), 10) },
+  { id: "sudden_r20", name: "Untouchable Soul", desc: "Reach round 20 in Sudden Death.", group: "Sudden Death", progress: x => goal(sudden(x.run), 20) },
+  { id: "sudden_hard", name: "Edge of the Blade", desc: "Beat a boss on Hard in Sudden Death.", group: "Sudden Death", progress: x => yes(x.run.mode === "sudden" && x.run.difficulty === "hard" && x.run.bossesDefeated >= 1) },
+
+  // Marathon Mix
+  { id: "mix_r10", name: "Mixed Bag", desc: "Reach round 10 in Marathon Mix.", group: "Marathon Mix", progress: x => goal(mix(x.run), 10) },
+  { id: "mix_r20", name: "Chaos Theory", desc: "Reach round 20 in Marathon Mix.", group: "Marathon Mix", progress: x => goal(mix(x.run), 20) },
+  { id: "mix_giant", name: "Giant Killer", desc: "Beat a Giant Boss in Marathon Mix.", group: "Marathon Mix", progress: x => yes(x.run.mode === "mix" && x.run.giantBosses >= 1) },
+  { id: "mix_10_twists", name: "Seen It All", desc: `Play ${MIX.seenItAll} different twists in one Marathon Mix.`, group: "Marathon Mix", progress: x => goal(x.run.mode === "mix" ? x.run.twistsSeen : 0, MIX.seenItAll) },
 
   // Daily Challenge
   { id: "daily_first", name: "Daily Player", desc: "Play a Daily Challenge.", group: "Daily", progress: x => yes(x.run.daily || x.dailyStreak >= 1) },

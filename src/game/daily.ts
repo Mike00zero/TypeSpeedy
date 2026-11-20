@@ -69,6 +69,8 @@ export type RandomStreams = {
  * Separate random streams for each kind of pick, so (for example) earning a power-up earlier
  * than someone else doesn't change which words you get.
  */
+// The seed text still says "typespeedy" (the app's first name): changing it would change every
+// day's words, so it stays.
 export function dailyStreams(dateKey: string): RandomStreams {
   return {
     words: mulberry32(hash(`typespeedy:${dateKey}:words`)),
