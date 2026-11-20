@@ -9,6 +9,7 @@ import { Inter_400Regular, Inter_600SemiBold } from "@expo-google-fonts/inter";
 import { Cinzel_600SemiBold, Cinzel_800ExtraBold } from "@expo-google-fonts/cinzel";
 
 import Game from "./src/game/Game";
+import { ErrorBoundary } from "./src/game/ErrorBoundary";
 
 // Keep the Typo Tyrant splash up until the game's fonts are ready, then fade it out.
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -35,7 +36,9 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <Game />
+      <ErrorBoundary>
+        <Game />
+      </ErrorBoundary>
     </SafeAreaProvider>
   );
 }
