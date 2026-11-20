@@ -26,7 +26,7 @@ import * as Haptics from "expo-haptics";
 import { buzz, setHapticsEnabled } from "./haptics";
 import appConfig from "../../app.json";
 import { EMPTY_TRIALS, PRO, isProMode, spendTrial, trialsLeft, type ProTrials } from "./pro";
-import { PURCHASES_TEST_MODE, buyPro, getProPrice, restorePro } from "./purchases";
+import { PURCHASES_TEST_MODE, buyPro, checkProOwned, getProPrice, restorePro } from "./purchases";
 import { EMPTY_REVIEW, askForReview, shouldAskForReview, type ReviewState } from "./review";
 import { DEFAULT_REMINDER_HOUR, REMINDER_TIMES, allowReminders, cancelReminders, scheduleReminders } from "./reminders";
 import {
@@ -458,12 +458,22 @@ export default function Game() {
   /* ---------- setup ---------- */
   useEffect(() => {
     initSounds();
-    loadPro().then(p => {
-      proRef.current = p.pro;
-      setPro(p.pro);
-      trialsRef.current = p.trials;
-      setTrials(p.trials);
-    });
+    loadPro()
+      .then(p => {
+        proRef.current = p.pro;
+        setPro(p.pro);
+        trialsRef.current = p.trials;
+        setTrials(p.trials);
+        // Then ask the App Store (via RevenueCat) and follow it: picks up purchases made on another
+        // device and refunds. Unknown (offline, no store) keeps the saved status.
+        return checkProOwned();
+      })
+      .then(owned => {
+        if (owned === null || owned === proRef.current) return;
+        proRef.current = owned;
+        setPro(owned);
+        savePro(owned);
+      });
     getProPrice().then(price => price && setProPrice(price));
     Promise.all([loadExtras(), loadDaily()]).then(([x, d]) => {
       reviewRef.current = x.review;
@@ -2831,8 +2841,8 @@ export default function Game() {
                   </Text>
                 </>
               )}
-              {PURCHASES_TEST_MODE && pro && (
-                <Btn c={c} label="Turn Pro off (test mode only)" onPress={() => setProOwned(false)} secondary />
+              {__DEV__ && pro && (
+                <Btn c={c} label="Turn Pro off on this device (testing)" onPress={() => setProOwned(false)} secondary />
               )}
 
               <Text style={s.label}>LOOK & WORDS</Text>
