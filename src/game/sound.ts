@@ -9,21 +9,35 @@ const SOURCES = {
   over: require("../../assets/sounds/over.wav"),
   achieve: require("../../assets/sounds/achieve.wav"),
   victory: require("../../assets/music/victory.wav"),
+  victoryModern: require("../../assets/music/victory-modern.wav"),
 };
 
+/**
+ * Two soundtracks: chiptune for the Retro look and a synth score for the Modern look
+ * (see scripts/make-music.mjs and scripts/make-music-modern.mjs).
+ */
 const MUSIC_SOURCES = {
-  main: require("../../assets/music/music-main.wav"),
-  boss: require("../../assets/music/music-boss.wav"),
+  retro: {
+    main: require("../../assets/music/music-main.wav"),
+    boss: require("../../assets/music/music-boss.wav"),
+  },
+  modern: {
+    main: require("../../assets/music/music-main-modern.wav"),
+    boss: require("../../assets/music/music-boss-modern.wav"),
+  },
 };
 
 export type SoundName = keyof typeof SOURCES;
-export type MusicTrack = keyof typeof MUSIC_SOURCES;
+export type MusicTrack = "main" | "boss";
+export type MusicStyle = keyof typeof MUSIC_SOURCES;
 
 const MUSIC_VOLUME = 0.35; // music sits under the sound effects
 const CHECK_AFTER_MS = 450; // if a track still isn't playing this long after starting it, start it again
 
 let players: Partial<Record<SoundName, AudioPlayer>> = {};
-let musicPlayers: Partial<Record<MusicTrack, AudioPlayer>> = {};
+let musicPlayers: Partial<Record<`${MusicStyle}:${MusicTrack}`, AudioPlayer>> = {};
+let musicStyle: MusicStyle = "modern";
+const musicPlayer = (track: MusicTrack) => musicPlayers[`${musicStyle}:${track}`];
 let muted = false; // sound effects
 let musicOn = true;
 let currentTrack: MusicTrack | null = null; // what should be playing (even while paused or turned off)
@@ -38,13 +52,15 @@ export function initSounds() {
       players[name] = createAudioPlayer(SOURCES[name]);
     } catch {}
   }
-  for (const track of Object.keys(MUSIC_SOURCES) as MusicTrack[]) {
-    try {
-      const p = createAudioPlayer(MUSIC_SOURCES[track]);
-      p.loop = true;
-      p.volume = MUSIC_VOLUME;
-      musicPlayers[track] = p;
-    } catch {}
+  for (const style of Object.keys(MUSIC_SOURCES) as MusicStyle[]) {
+    for (const track of ["main", "boss"] as MusicTrack[]) {
+      try {
+        const p = createAudioPlayer(MUSIC_SOURCES[style][track]);
+        p.loop = true;
+        p.volume = MUSIC_VOLUME;
+        musicPlayers[`${style}:${track}`] = p;
+      } catch {}
+    }
   }
 }
 
@@ -65,7 +81,10 @@ async function restart(p: AudioPlayer, stillWanted: () => boolean = () => true) 
 
 export function setMuted(m: boolean) {
   muted = m;
-  if (m) players.victory?.pause();
+  if (m) {
+    players.victory?.pause();
+    players.victoryModern?.pause();
+  }
 }
 
 export function play(name: SoundName) {
@@ -88,7 +107,7 @@ function stopLoops() {
 function startCurrent(fromStart: boolean) {
   if (!musicOn || musicPaused || !currentTrack) return;
   const track = currentTrack;
-  const p = musicPlayers[track];
+  const p = musicPlayer(track);
   if (!p) return;
   const request = ++musicRequest;
   const stillWanted = () => request === musicRequest && musicOn && !musicPaused && currentTrack === track;
@@ -111,7 +130,7 @@ function startCurrent(fromStart: boolean) {
 
 /** Switches the background loop ("main", "boss", or null for silence). Same track keeps playing. */
 export function playMusic(track: MusicTrack | null) {
-  const p = track ? musicPlayers[track] : null;
+  const p = track ? musicPlayer(track) : null;
   if (track === currentTrack && !musicPaused && (!p || p.playing || !musicOn)) return;
   const changed = track !== currentTrack;
   musicRequest++; // cancel any start still in flight
@@ -139,7 +158,7 @@ export function playVictory() {
   stopLoops();
   currentTrack = null;
   if (muted) return;
-  const p = players.victory;
+  const p = musicStyle === "modern" ? players.victoryModern : players.victory;
   if (!p) return;
   restart(p);
   setTimeout(() => {
@@ -149,6 +168,15 @@ export function playVictory() {
       } catch {}
     }
   }, CHECK_AFTER_MS);
+}
+
+/** Picks the soundtrack to match the look; whatever is playing switches over from the top. */
+export function setMusicStyle(style: MusicStyle) {
+  if (style === musicStyle) return;
+  musicStyle = style;
+  musicRequest++;
+  stopLoops();
+  startCurrent(true);
 }
 
 export function setMusicEnabled(on: boolean) {

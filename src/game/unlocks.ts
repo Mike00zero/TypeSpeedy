@@ -4,7 +4,7 @@
  */
 import { ACHIEVEMENT_BY_ID, type Unlocked } from "./achievements";
 import { MAX_WORD_LENGTH } from "./config";
-import { courtPalette, darkPalette, getLook, lightPalette, type Palette } from "./theme";
+import { courtPalette, getLook, royalPalette, type Palette } from "./theme";
 
 /** What it takes to unlock something: a number of achievements, or one specific achievement. */
 export type Requirement = { free: true } | { count: number } | { achievement: string };
@@ -219,9 +219,16 @@ export function themePalette(id: ThemeId, systemDark: boolean): { c: Palette; da
   const court = getLook() === "court";
   if (court && t.id === "classic") return { c: THEME_BY_ID.sunset.palette!, dark: true };
   if (court && t.id === "sunset") return { c: courtPalette, dark: true };
-  if (!t.palette) return { c: systemDark ? darkPalette : lightPalette, dark: systemDark };
+  if (!t.palette) return { c: royalPalette, dark: true }; // Modern look's default: Royal Throne plum
+  void systemDark; // both looks are dark by design now
   return { c: t.palette, dark: t.dark };
 }
+
+/**
+ * The Retro look (the original Royal Court, NES-style design) is an unlockable in Customize.
+ * It's free (no Pro needed) once you've earned a few achievements.
+ */
+export const RETRO_LOOK = { name: "Retro Court", requires: { count: 5 } as Requirement };
 
 /** A theme's name as shown (Classic and Sunset swap names along with their colors in the Royal Court look). */
 export function themeName(t: Theme): string {
@@ -319,8 +326,10 @@ export const WORD_PACKS: WordPack[] = [
 export const PACK_BY_ID = Object.fromEntries(WORD_PACKS.map(p => [p.id, p])) as Record<PackId, WordPack>;
 
 /** Unlockables that `unlocked` reaches but `before` didn't. */
-export function newUnlockables(before: Unlocked, after: Unlocked): { kind: "theme" | "pack"; name: string }[] {
-  const fresh: { kind: "theme" | "pack"; name: string }[] = [];
+export function newUnlockables(before: Unlocked, after: Unlocked): { kind: "theme" | "pack" | "style"; name: string }[] {
+  const fresh: { kind: "theme" | "pack" | "style"; name: string }[] = [];
+  if (meetsRequirement(RETRO_LOOK.requires, after) && !meetsRequirement(RETRO_LOOK.requires, before))
+    fresh.push({ kind: "style", name: RETRO_LOOK.name });
   for (const t of THEMES)
     if (meetsRequirement(t.requires, after) && !meetsRequirement(t.requires, before)) fresh.push({ kind: "theme", name: themeName(t) });
   for (const p of WORD_PACKS)

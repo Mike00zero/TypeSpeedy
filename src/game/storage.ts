@@ -82,10 +82,10 @@ export async function loadPrefs(): Promise<Prefs> {
       haptics: get(HAPTICS) !== "0", // on unless turned off
       effects: get(EFFECTS) !== "0",
       mode: MODE_BY_ID[get(MODE) as GameMode] ? (get(MODE) as GameMode) : "classic",
-      look: get(LOOK) === "modern" ? "modern" : "court",
+      look: get(LOOK) === "court" ? "court" : "modern", // Modern is the default look
     };
   } catch {
-    return { best, muted: false, music: true, difficulty: "medium", theme: "classic", pack: "classic", haptics: true, effects: true, mode: "classic", look: "court" };
+    return { best, muted: false, music: true, difficulty: "medium", theme: "classic", pack: "classic", haptics: true, effects: true, mode: "classic", look: "modern" };
   }
 }
 
