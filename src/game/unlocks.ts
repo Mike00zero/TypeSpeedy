@@ -228,7 +228,7 @@ export function themePalette(id: ThemeId, systemDark: boolean): { c: Palette; da
  * The Retro look (the original Royal Court, NES-style design) is an unlockable in Customize.
  * It's free (no Pro needed) once you've earned a few achievements.
  */
-export const RETRO_LOOK = { name: "Retro Court", requires: { count: 5 } as Requirement };
+export const RETRO_LOOK = { name: "Retro Court", requires: { count: 25 } as Requirement };
 
 /** A theme's name as shown (Classic and Sunset swap names along with their colors in the Royal Court look). */
 export function themeName(t: Theme): string {
