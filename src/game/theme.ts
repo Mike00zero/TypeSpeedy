@@ -105,7 +105,7 @@ const court: Palette = {
  * corners, shield-shaped lives. "modern" is the original clean design (Settings > Look).
  */
 export type Look = "court" | "modern";
-let look: Look = "court";
+let look: Look = "modern";
 export function setLook(l: Look) {
   look = l;
 }
@@ -119,8 +119,41 @@ export function withAlpha(color: string, alpha: number): string {
   return color + Math.round(alpha * 255).toString(16).padStart(2, "0");
 }
 
+/** Blends a #RRGGBB color toward white by `amount` (0–1), keeping it opaque. */
+export function lighten(color: string, amount: number): string {
+  if (!/^#[0-9a-fA-F]{6}$/.test(color)) return color;
+  const ch = (i: number) => {
+    const v = parseInt(color.slice(i, i + 2), 16);
+    return Math.round(v + (255 - v) * amount).toString(16).padStart(2, "0");
+  };
+  return `#${ch(1)}${ch(3)}${ch(5)}`;
+}
+
 /** The Classic theme's two looks (it follows the phone's light or dark mode). */
 export const lightPalette = light;
+
+/**
+ * "Royal Throne": the Modern look's default colors. Warm plum, frosted glass, gold and crimson.
+ * Surfaces and lines are translucent white so panels read as glass over the glowing backdrop.
+ */
+export const royalPalette: Palette = {
+  bg: "#140B22",
+  surface: "rgba(255, 255, 255, 0.07)",
+  ink: "#F7EEFA",
+  muted: "#C9B3D6",
+  ghost: "#5E4A70",
+  line: "rgba(255, 255, 255, 0.13)",
+  accent: "#FFD27A",
+  accentSoft: "rgba(255, 210, 122, 0.14)",
+  onAccent: "#2A1606",
+  good: "#7BE0A6",
+  miss: "#FF4F7B",
+  missSoft: "rgba(255, 79, 123, 0.2)",
+  scrim: "rgba(20, 11, 34, 0.88)",
+  gold: "#FFD27A",
+  ice: "#7FD8FF",
+  violet: "#C9A8FF",
+};
 export const courtPalette = court;
 export const darkPalette = dark;
 
@@ -133,9 +166,10 @@ export const courtFonts = {
   bodyStrong: "Inter_600SemiBold",
 };
 
+/** Fonts for the Modern look: Outfit for titles, the same word and body fonts. */
 export const fonts = {
-  display: "BricolageGrotesque_800ExtraBold",
-  displayMedium: "BricolageGrotesque_500Medium",
+  display: "Outfit_700Bold",
+  displayMedium: "Outfit_600SemiBold",
   word: "IBMPlexMono_600SemiBold",
   body: "Inter_400Regular",
   bodyStrong: "Inter_600SemiBold",

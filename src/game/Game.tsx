@@ -76,13 +76,14 @@ import {
   type DifficultyId,
 } from "./config";
 import { pickWord } from "./words";
-import { bossPalette, courtFonts, fonts, getLook, setLook, usePalette, withAlpha, type Look, type Palette } from "./theme";
+import { bossPalette, courtFonts, fonts, getLook, lighten, setLook, usePalette, withAlpha, type Look, type Palette } from "./theme";
 import {
   PACK_BY_ID,
   THEMES,
   WORD_PACKS,
   meetsRequirement,
   newUnlockables,
+  RETRO_LOOK,
   requirementText,
   themePalette,
   themeName,
@@ -91,7 +92,17 @@ import {
   type ThemeId,
   type WordPack,
 } from "./unlocks";
-import { initSounds, pauseMusic, play, playMusic, playVictory, resumeMusic, setMusicEnabled, setMuted } from "./sound";
+import {
+  initSounds,
+  pauseMusic,
+  play,
+  playMusic,
+  playVictory,
+  resumeMusic,
+  setMusicEnabled,
+  setMusicStyle,
+  setMuted,
+} from "./sound";
 import {
   loadAchievements,
   loadDaily,
@@ -137,6 +148,7 @@ import {
 } from "./storage";
 import { useKeyboardHeight } from "./useKeyboardHeight";
 import { CourtMenu, PauseIcon, ShieldIcon, type CourtMenuProps } from "./court";
+import { ModernBackdrop, ModernMenu, PowerUpGlyph, type ModeTile, type ModernMenuProps } from "./modern";
 import { LinearGradient } from "expo-linear-gradient";
 import {
   BONUS,
@@ -386,12 +398,16 @@ export default function Game() {
   const [reminder, setReminder] = useState<ReminderPrefs>({ on: false, hour: DEFAULT_REMINDER_HOUR, asked: false });
   const reminderRef = useRef<ReminderPrefs>(reminder);
   // Themes other than Classic need Pro to use (they still unlock through achievements).
-  // The overall look (Royal Court by default, or the original Modern design). Set before any styles are made.
-  const [look, setLookState] = useState<Look>("court");
-  setLook(look);
+  const [unlocked, setUnlocked] = useState<Unlocked>({});
   // Developer builds only: try every theme and word pack without earning them or buying Pro.
   const [devUnlockAll, setDevUnlockAll] = useState(false);
   const devUnlockRef = useRef(false);
+  // The overall look: Modern ("Royal Throne", the default) or Retro ("Royal Court", unlockable in
+  // Customize). A saved Retro choice only applies while it's unlocked. Set before any styles are made.
+  const [lookPref, setLookState] = useState<Look>("modern");
+  const retroUnlocked = devUnlockAll || meetsRequirement(RETRO_LOOK.requires, unlocked);
+  const look: Look = lookPref === "court" && retroUnlocked ? "court" : "modern";
+  setLook(look);
   const canStyle = pro || devUnlockAll; // may use non-Classic themes and packs
   const { c: baseColors, dark: isDark } = themePalette(canStyle ? themeId : "classic", systemDark);
   const insets = useSafeAreaInsets();
@@ -428,7 +444,6 @@ export default function Game() {
   const rng = useRef<RandomStreams>(freeStreams());
   const dailyStreakRef = useRef(0); // current day-streak count, for achievement checks
   dailyStreakRef.current = dailyStreak.count;
-  const [unlocked, setUnlocked] = useState<Unlocked>({});
   const unlockedRef = useRef<Unlocked>({});
   const [lifetime, setLifetime] = useState<LifetimeStats>(EMPTY_LIFETIME);
   const lifetimeRef = useRef<LifetimeStats>(EMPTY_LIFETIME);
@@ -670,13 +685,14 @@ export default function Game() {
     const unlockables = newUnlockables(before, unlockedRef.current);
     if (G.phase !== "title") {
       // In a game: no pop-ups to break concentration. They're listed together on the game-over screen.
-      for (const u of unlockables) G.newUnlocks.push(u.kind === "theme" ? `${u.name} theme` : `${u.name} word pack`);
+      for (const u of unlockables)
+        G.newUnlocks.push(u.kind === "theme" ? `${u.name} theme` : u.kind === "style" ? `${u.name} style` : `${u.name} word pack`);
       return;
     }
     toastQueue.current.push(...fresh.map(a => ({ eyebrow: "ACHIEVEMENT UNLOCKED", name: a.name, desc: a.desc })));
     for (const u of unlockables) {
       toastQueue.current.push({
-        eyebrow: u.kind === "theme" ? "NEW THEME UNLOCKED" : "NEW WORD PACK UNLOCKED",
+        eyebrow: u.kind === "theme" ? "NEW THEME UNLOCKED" : u.kind === "style" ? "NEW STYLE UNLOCKED" : "NEW WORD PACK UNLOCKED",
         name: u.name,
         desc: "Pick it from Customize on the main menu.",
       });
@@ -1739,12 +1755,18 @@ export default function Game() {
     } else setPaywallMsg(r.reason);
   };
 
-  const toggleLook = (royal: boolean) => {
-    const next: Look = royal ? "court" : "modern";
+  /** Customize › Style: Modern (default) or Retro (once unlocked). */
+  const chooseLook = (next: Look) => {
+    if (next === "court" && !retroUnlocked) return;
     setLookState(next);
     saveLook(next);
     buzz.select().catch(() => {});
   };
+
+  // The soundtrack follows the look: chiptune for Retro, synth score for Modern.
+  useEffect(() => {
+    setMusicStyle(look === "court" ? "retro" : "modern");
+  }, [look]);
 
   const toggleHaptics = (on: boolean) => {
     setHapticsOn(on);
@@ -1952,6 +1974,56 @@ export default function Game() {
     };
   };
 
+  /** Modern main menu: the Court menu's content, plus the row of mode tiles. */
+  const modernMenuProps = (): ModernMenuProps => {
+    const cp = courtMenuProps();
+    const today = todayKey();
+    const rec = dailyRecord?.date === today ? dailyRecord : null;
+    const streakOn = dailyStreak.count > 0 && (dailyStreak.lastDate === today || dailyStreak.lastDate === yesterdayKey());
+    const tiles: ModeTile[] = [
+      {
+        key: "daily",
+        title: "Daily\nChallenge",
+        badge: rec ? "DONE" : "TODAY",
+        selected: false,
+        onPress: () => (rec ? undefined : startGame(true)),
+      },
+      ...MODES.map(m => ({
+        key: m.id,
+        title: m.name.replace(" ", "\n"),
+        badge: isProMode(m.id) && !pro ? "PRO" : undefined,
+        selected: mode === m.id,
+        onPress: () => (mode === m.id ? startGame() : chooseMode(m.id)),
+      })),
+    ];
+    return {
+      c,
+      topInset: insets.top,
+      bottomInset: insets.bottom,
+      streak: streakOn ? `${dailyStreak.count}-day streak` : "",
+      onSettings: openSettings,
+      tiles,
+      quest: {
+        name: cp.quest.name,
+        tagline: cp.quest.tagline,
+        right: mode === "tower" ? `Floor ${tower.checkpoint} / ${TOWER.floors}` : undefined,
+        detail: cp.quest.detail,
+        progress: cp.quest.progress,
+        proNote: cp.quest.proNote,
+      },
+      difficulties: cp.difficulties,
+      onProNote: openPaywall,
+      startLabel: cp.startLabel,
+      onStart: cp.onStart,
+      trophies: `Trophies ${Object.keys(unlocked).length}/${ACHIEVEMENTS.length}`,
+      onHelp: cp.onCodex,
+      onStats: cp.onChronicle,
+      onTrophies: cp.onTrophies,
+      onCustomize: cp.onArmory,
+      royalPass: cp.royalPass,
+    };
+  };
+
   return (
     <View
       style={[
@@ -1962,6 +2034,7 @@ export default function Game() {
       ]}
     >
       <StatusBar style={isDark || G.inBoss ? "light" : "dark"} />
+      {look !== "court" && <ModernBackdrop c={c} />}
 
       {/* HUD */}
       <View style={s.hud}>
@@ -2000,8 +2073,8 @@ export default function Game() {
           style={[
             s.label,
             (low || showNoLives) && { color: c.miss },
-            // Royal Court shows lives as shields only, no "LIVES n" label
-            look === "court" && !showNoLives && !sprinting && !zenMode && { display: "none" },
+            // Lives show as shields (Court) or glowing bars (Modern), no "LIVES n" label
+            !showNoLives && !sprinting && !zenMode && { display: "none" },
           ]}
         >
           {zenMode
@@ -2027,12 +2100,13 @@ export default function Game() {
                 </Animated.View>
               );
             }
+            const many = Math.max(startLives, G.lives) > 6;
             return (
               <Animated.View
                 key={i}
                 style={[
                   s.pip,
-                  { backgroundColor: lost ? c.line : low ? c.miss : c.ink },
+                  { width: many ? 20 : 34, backgroundColor: lost ? c.line : c.miss, shadowOpacity: lost ? 0 : 0.85 },
                   { transform: [{ scale: p }], opacity: !lost && low ? pulse : 1 },
                 ]}
               />
@@ -2052,18 +2126,10 @@ export default function Game() {
           style={s.bossBar}
           accessibilityLabel={`${G.bossName}: ${G.bossHp} of ${G.bossMaxHp} health left${G.bossArmor > 1 ? `, armored: ${G.bossArmor} words per block` : ""}`}
         >
-          {look === "court" ? (
-            <>
-              <Text style={[s.label, { color: c.gold, letterSpacing: 3 }]}>{G.bossArmor > 1 ? "FINAL BOSS" : "BOSS"}</Text>
-              <Text style={s.courtBossName} numberOfLines={1}>
-                {G.bossName}
-              </Text>
-            </>
-          ) : (
-            <Text style={[s.label, { color: G.bossArmor > 1 ? c.gold : c.miss }]} numberOfLines={1}>
-              {G.bossArmor > 1 ? "FINAL BOSS" : "BOSS"} · {G.bossName.toUpperCase()}
-            </Text>
-          )}
+          <Text style={[s.label, { color: c.gold, letterSpacing: 3 }]}>{G.bossArmor > 1 ? "FINAL BOSS" : "BOSS"}</Text>
+          <Text style={s.courtBossName} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>
+            {G.bossName}
+          </Text>
           <View style={[s.bossHpRow, G.bossArmor > 1 && [s.bossArmored, { borderColor: c.gold }]]}>
             {Array.from({ length: G.bossMaxHp }, (_, i) => {
               const alive = i < G.bossHp;
@@ -2091,7 +2157,7 @@ export default function Game() {
             })}
           </View>
           {G.bossArmor > 1 && (
-            <Text style={[s.meta, { color: c.gold }, look === "court" && { fontSize: 11 }]} numberOfLines={1} adjustsFontSizeToFit>
+            <Text style={[s.meta, { color: c.gold, fontSize: 11 }]} numberOfLines={1} adjustsFontSizeToFit>
               Armored · {G.bossArmor} words per block{G.bossRegen ? " · heals when you're slow" : ""}
             </Text>
           )}
@@ -2171,18 +2237,14 @@ export default function Game() {
 
         <View style={s.fuse}>
           <View style={[s.fuseTrack, zenMode && { display: "none" }]}>
-            {look === "court" ? (
-              <Animated.View style={[s.fuseFill, { transform: [{ scaleX: fuse }] }]}>
-                <LinearGradient
-                  colors={G.inBoss ? ["#C8243B", "#FF8A3D"] : [c.accent, c.gold]}
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={StyleSheet.absoluteFill}
-                />
-              </Animated.View>
-            ) : (
-              <Animated.View style={[s.fuseFill, { backgroundColor: c.accent, transform: [{ scaleX: fuse }] }]} />
-            )}
+            <Animated.View style={[s.fuseFill, { transform: [{ scaleX: fuse }] }]}>
+              <LinearGradient
+                colors={look !== "court" ? [c.miss, c.gold] : G.inBoss ? ["#C8243B", "#FF8A3D"] : [c.accent, c.gold]}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+                style={StyleSheet.absoluteFill}
+              />
+            </Animated.View>
             <Animated.View
               style={[s.fuseFill, s.fuseHot, { backgroundColor: c.miss, opacity: hotOpacity, transform: [{ scaleX: fuse }] }]}
             />
@@ -2222,27 +2284,30 @@ export default function Game() {
         </Text>
       </Pressable>
 
-      {!sprinting && !zenMode && <PowerUpTray c={c} G={G} onUse={activatePowerUp} onUseBonus={activateBonus} />}
+      {!sprinting && !zenMode && (
+        <PowerUpTray
+          c={c}
+          G={G}
+          onUse={activatePowerUp}
+          onUseBonus={activateBonus}
+          onPause={() => (G.phase === "paused" ? resume() : pause())}
+        />
+      )}
 
-      <View style={s.controls}>
-        {look === "court" ? (
-          <Pressable
-            style={s.courtRound}
-            onPress={() => (G.phase === "paused" ? resume() : pause())}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel={G.phase === "paused" ? "Resume" : "Pause"}
-          >
-            <PauseIcon color={c.gold} />
-          </Pressable>
-        ) : (
-          <Pressable style={s.chip} onPress={() => (G.phase === "paused" ? resume() : pause())} hitSlop={8}>
-            <Text style={s.chipText}>{G.phase === "paused" ? "RESUME" : "PAUSE"}</Text>
-          </Pressable>
-        )}
+      {/* Modern puts pause inside the power-up row; Sprint and Zen have no tray */}
+      <View style={[s.controls, look !== "court" && !sprinting && !zenMode && { display: "none" }]}>
+        <Pressable
+          style={s.courtRound}
+          onPress={() => (G.phase === "paused" ? resume() : pause())}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel={G.phase === "paused" ? "Resume" : "Pause"}
+        >
+          <PauseIcon color={look === "court" ? c.gold : c.ink} />
+        </Pressable>
         {zenMode && G.phase !== "over" && G.phase !== "title" && (
           <Pressable
-            style={[s.chip, { borderColor: c.accent }]}
+            style={[s.chip, { borderColor: c.accent, alignSelf: "center" }]}
             onPress={finishZen}
             hitSlop={8}
             accessibilityRole="button"
@@ -2251,12 +2316,6 @@ export default function Game() {
             <Text style={[s.chipText, { color: c.accent }]}>FINISH</Text>
           </Pressable>
         )}
-        <Pressable style={[s.chip, look === "court" && { display: "none" }]} onPress={toggleMute} hitSlop={8}>
-          <Text style={s.chipText}>{muted ? "SOUND OFF" : "SOUND ON"}</Text>
-        </Pressable>
-        <Pressable style={[s.chip, look === "court" && { display: "none" }]} onPress={toggleMusic} hitSlop={8}>
-          <Text style={s.chipText}>{musicOn ? "MUSIC ON" : "MUSIC OFF"}</Text>
-        </Pressable>
       </View>
 
       <TextInput
@@ -2299,203 +2358,7 @@ export default function Game() {
       {/* Overlays */}
       {G.phase === "title" && look === "court" && <CourtMenu {...courtMenuProps()} />}
 
-      {G.phase === "title" && look !== "court" && (
-        <Overlay c={c} pop={overlayPop}>
-          <View style={s.achHead}>
-            <Text style={[s.eyebrow, { flex: 1, paddingTop: 6 }]}>A TYPING SURVIVAL GAME</Text>
-            <Pressable style={s.chip} onPress={openSettings} hitSlop={10} accessibilityRole="button" accessibilityLabel="Settings">
-              <Text style={s.chipText}>SETTINGS</Text>
-            </Pressable>
-          </View>
-          <Text style={s.h1}>Typo Tyrant</Text>
-          <Text style={s.demo}>
-            <Text style={{ color: c.ink }}>surv</Text>
-            <Text style={{ color: c.miss, textDecorationLine: "underline" }}>i</Text>
-            <Text style={{ color: c.ink }}>v</Text>
-            <Text style={{ color: c.ghost }}>al</Text>
-          </Text>
-          <Text style={s.body}>
-            Type each word before the clock runs out. Wrong letters cost lives, every round gets faster, and a boss waits
-            at the end of each one. How long can you last?
-          </Text>
-          <DailyCard
-            c={c}
-            record={dailyRecord?.date === todayKey() ? dailyRecord : null}
-            streak={dailyStreak}
-            onPlay={() => startGame(true)}
-          />
-          <Text style={s.label}>OR PICK A MODE</Text>
-          <Pressable
-            onPress={() => setShowModes(true)}
-            style={({ pressed }) => [s.modeButton, pressed && { transform: [{ scale: 0.98 }] }]}
-            accessibilityRole="button"
-            accessibilityLabel={`Game mode: ${MODE_BY_ID[mode].name}. Change mode`}
-          >
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={[s.diffLabel, { color: c.accent }]}>{MODE_BY_ID[mode].name}</Text>
-              <Text style={s.diffWords}>{MODE_BY_ID[mode].tagline}</Text>
-            </View>
-            <View style={s.chip}>
-              <Text style={s.chipText}>CHANGE</Text>
-            </View>
-          </Pressable>
-          {isProMode(mode) && !pro && (
-            <Pressable onPress={openPaywall} style={s.proLine} accessibilityRole="button">
-              <Text style={s.proBadge}>PRO</Text>
-              <Text style={[s.slotEffect, { flex: 1 }]}>
-                {trialsLeft(trials, mode, todayKey()) > 0
-                  ? "Pro mode · you have a free try today"
-                  : "Pro mode · today’s free try is used. Tap to unlock Pro."}
-              </Text>
-            </Pressable>
-          )}
-          {mode === "mix" ? (
-            <>
-              <View style={s.towerCard}>
-                <Text style={[s.label, { color: c.gold }]}>MARATHON MIX</Text>
-                <Text style={s.dailyTitle}>
-                  {mixBest.score ? `Best ${mixBest.score.toLocaleString()} · round ${mixBest.round}` : "Expect the unexpected"}
-                </Text>
-                <Text style={s.slotEffect}>
-                  Medium rules · 10 lives · every round has a twist:{" "}
-                  {(Object.values(MIX_TWISTS) as { id: MixTwistId; name: string }[])
-                    .filter(t => t.id !== "warmup")
-                    .map(t => t.name)
-                    .join(", ")}
-                </Text>
-              </View>
-              <Btn c={c} label="Start Marathon Mix" onPress={() => startGame()} />
-            </>
-          ) : mode === "sudden" ? (
-            <>
-              <Text style={s.label}>DIFFICULTY</Text>
-              <View style={s.diffGrid} accessibilityRole="radiogroup">
-                {DIFFICULTY_ORDER.map(id => (
-                  <DifficultyCard
-                    key={id}
-                    c={c}
-                    d={DIFFICULTIES[id]}
-                    best={suddenBest[id]}
-                    selected={difficulty === id}
-                    onPress={() => chooseDifficulty(id)}
-                    livesOverride={1}
-                  />
-                ))}
-              </View>
-              <Text style={[s.slotEffect, { color: c.miss }]}>
-                One life on any difficulty. A wrong letter or a slow word ends it. Every point counts {SUDDEN.multiplier}×, and
-                extra lives never drop.
-              </Text>
-              <Btn c={c} label={`Start Sudden Death · ${G.d.label}`} onPress={() => startGame()} />
-            </>
-          ) : mode === "rush" ? (
-            <>
-              <View style={s.towerCard}>
-                <Text style={[s.label, { color: c.miss }]}>BOSS RUSH</Text>
-                <Text style={s.dailyTitle}>
-                  {rushBest.bosses
-                    ? `Best: ${rushBest.bosses} boss${rushBest.bosses === 1 ? "" : "es"}`
-                    : "How many bosses can you beat?"}
-                </Text>
-                <Text style={s.slotEffect}>
-                  {rushBest.score ? `Top score ${rushBest.score.toLocaleString()} · ` : ""}
-                  {RUSH.lives} lives · Medium rules · every boss is a little faster · a gold bonus after each win
-                </Text>
-              </View>
-              <Btn c={c} label="Start Boss Rush" onPress={() => startGame()} />
-            </>
-          ) : mode === "zen" ? (
-            <>
-              <View style={s.towerCard}>
-                <Text style={[s.label, { color: c.gold }]}>ZEN · PRACTICE</Text>
-                <Text style={s.dailyTitle}>{zenBest.wpm ? `Best ${zenBest.wpm} wpm` : "No clock, no pressure"}</Text>
-                <Text style={s.slotEffect}>
-                  {zenBest.sessions
-                    ? `Longest session ${zenBest.words} words · ${zenBest.sessions} session${zenBest.sessions === 1 ? "" : "s"} · `
-                    : ""}
-                  Wrong letters turn red but cost nothing · tap Finish to see your speed and accuracy
-                </Text>
-              </View>
-              <Btn c={c} label="Start Zen" onPress={() => startGame()} />
-            </>
-          ) : mode === "sprint" ? (
-            <>
-              <View style={s.towerCard}>
-                <Text style={[s.label, { color: c.gold }]}>SPRINT · {SPRINT.seconds} SECONDS</Text>
-                <Text style={s.dailyTitle}>
-                  {sprintBest.score ? `Best ${sprintBest.score.toLocaleString()} points` : "No sprints yet"}
-                </Text>
-                <Text style={s.slotEffect}>
-                  {sprintBest.score ? `Most words ${sprintBest.words} · top speed ${sprintBest.wpm} wpm · ` : ""}No lives, no
-                  power-ups · a wrong letter costs {SPRINT.missPenalty} second
-                </Text>
-              </View>
-              <Btn c={c} label="Start sprint" onPress={() => startGame()} />
-            </>
-          ) : mode === "classic" ? (
-            <>
-              <Text style={s.label}>DIFFICULTY</Text>
-              <View style={s.diffGrid} accessibilityRole="radiogroup">
-                {DIFFICULTY_ORDER.map(id => (
-                  <DifficultyCard
-                    key={id}
-                    c={c}
-                    d={DIFFICULTIES[id]}
-                    best={best[id]}
-                    selected={difficulty === id}
-                    onPress={() => chooseDifficulty(id)}
-                  />
-                ))}
-              </View>
-              {tower.cleared && (
-                <Text style={[s.slotEffect, { color: c.gold }]}>
-                  Phoenix Feather ready: once per game, losing your last life brings you back with {PHOENIX.lives}.
-                </Text>
-              )}
-              <Btn c={c} label={`Start ${G.d.label}`} onPress={() => startGame()} />
-            </>
-          ) : (
-            <>
-              <TowerCard c={c} t={tower} />
-              <Btn
-                c={c}
-                label={tower.checkpoint ? `Climb from floor ${tower.checkpoint + 1}` : "Start climbing"}
-                onPress={() => startGame()}
-              />
-            </>
-          )}
-          <View style={s.btnGrid}>
-            <View style={s.btnHalf}>
-              <Btn c={c} label="How to play" onPress={() => setShowHelp(true)} secondary />
-            </View>
-            <View style={s.btnHalf}>
-              <Btn c={c} label="Stats" onPress={() => setShowStats(true)} secondary />
-            </View>
-            <View style={s.btnHalf}>
-              <Btn
-                c={c}
-                label={`Achievements ${Object.keys(unlocked).length}/${ACHIEVEMENTS.length}`}
-                onPress={() => setShowAchievements(true)}
-                secondary
-              />
-            </View>
-            <View style={s.btnHalf}>
-              <Btn c={c} label="Customize" onPress={() => setShowCustomize(true)} secondary />
-            </View>
-          </View>
-          {!pro && (
-            <Pressable
-              onPress={openPaywall}
-              style={({ pressed }) => [s.proCta, pressed && { transform: [{ scale: 0.98 }] }]}
-              accessibilityRole="button"
-            >
-              <Text style={[s.label, { color: c.gold }]}>TYPO TYRANT PRO</Text>
-              <Text style={s.dailyTitle}>Unlock every mode and theme</Text>
-              <Text style={s.slotEffect}>One payment of {proPrice} · no subscription, no ads</Text>
-            </Pressable>
-          )}
-        </Overlay>
-      )}
+      {G.phase === "title" && look !== "court" && <ModernMenu {...modernMenuProps()} />}
 
       {G.phase === "title" && showStats && (
         <Overlay c={c} pop={overlayPop}>
@@ -2576,6 +2439,33 @@ export default function Game() {
           <Text style={s.body}>
             Earn achievements to unlock new color themes and word packs.{pro ? "" : " Using them needs Typo Tyrant Pro."}
           </Text>
+          <Text style={s.label}>STYLE</Text>
+          <View style={s.diffGrid} accessibilityRole="radiogroup">
+            {(
+              [
+                ["modern", "Modern", "Royal Throne · glass and glow · synth score", true],
+                ["court", RETRO_LOOK.name, "Pixel-perfect castle · carved titles · chiptune", retroUnlocked],
+              ] as [Look, string, string, boolean][]
+            ).map(([id, name, detail, open]) => (
+              <Pressable
+                key={id}
+                onPress={() => chooseLook(id)}
+                disabled={!open}
+                style={[s.diffCard, look === id && { borderColor: c.accent, backgroundColor: c.accentSoft }, !open && { opacity: 0.7 }]}
+                accessibilityRole="radio"
+                accessibilityState={{ selected: look === id, disabled: !open }}
+                accessibilityLabel={`${name} style${open ? "" : `, locked. ${requirementText(RETRO_LOOK.requires)}`}`}
+              >
+                <Text style={[s.diffLabel, look === id && { color: c.accent }]}>
+                  {open ? "" : "🔒 "}
+                  {name}
+                </Text>
+                <Text style={s.diffWords}>{open ? detail : requirementText(RETRO_LOOK.requires)}</Text>
+                {look === id && <Text style={s.achDate}>IN USE</Text>}
+              </Pressable>
+            ))}
+          </View>
+
           <Text style={s.label}>COLOR THEME</Text>
           <View style={s.diffGrid} accessibilityRole="radiogroup">
             {THEMES.map(t => (
@@ -2725,22 +2615,10 @@ export default function Game() {
             </Pressable>
           </View>
 
-          <Text style={s.label}>LOOK</Text>
-          <View style={s.setGroup}>
-            <SettingRow
-              c={c}
-              label="Royal Court design"
-              detail="Gold trim, carved titles and shield lives. Turn off for the original clean design."
-              value={look === "court"}
-              onChange={toggleLook}
-              last
-            />
-          </View>
-
           <Text style={s.label}>SOUND</Text>
           <View style={s.setGroup}>
             <SettingRow c={c} label="Sound effects" detail="Key clicks, misses and fanfares" value={!muted} onChange={toggleMute} />
-            <SettingRow c={c} label="Music" detail="Retro background music" value={musicOn} onChange={toggleMusic} last />
+            <SettingRow c={c} label="Music" detail="Background music (matches your style)" value={musicOn} onChange={toggleMusic} last />
           </View>
 
           <Text style={s.label}>FEEL</Text>
@@ -2881,7 +2759,7 @@ export default function Game() {
           )}
 
           <Text style={s.slotEffect}>
-            Typo Tyrant {APP_VERSION} · Music and sounds are original, made for this game · Fonts: Bricolage Grotesque, IBM Plex
+            Typo Tyrant {APP_VERSION} · Music and sounds are original, made for this game · Fonts: Outfit, Cinzel, IBM Plex
             Mono and Inter (SIL Open Font License)
           </Text>
           <Btn c={c} label="Done" onPress={() => setShowSettings(false)} />
@@ -3275,35 +3153,6 @@ export default function Game() {
   );
 }
 
-/** Main menu, Tower Climb: progress up the tower, checkpoints marked. */
-function TowerCard({ c, t }: { c: Palette; t: TowerProgress }) {
-  const s = styles(c);
-  const marks = Array.from({ length: TOWER.floors / TOWER.checkpointEvery }, (_, i) => (i + 1) * TOWER.checkpointEvery);
-  return (
-    <View style={s.towerCard} accessibilityLabel={`Tower progress: checkpoint ${t.checkpoint}, best floor ${t.best}`}>
-      <Text style={[s.label, { color: c.gold }]}>{t.cleared ? "TOWER CLIMB · SUMMIT REACHED" : "TOWER CLIMB"}</Text>
-      <Text style={s.dailyTitle}>
-        {t.checkpoint ? `Checkpoint: floor ${t.checkpoint}` : "Start at floor 1"}
-      </Text>
-      <View style={s.towerTrack}>
-        <View style={[s.towerFill, { backgroundColor: c.ghost, width: `${t.best}%` }]} />
-        <View style={[s.towerFill, { backgroundColor: c.gold, width: `${t.checkpoint}%` }]} />
-        {marks.map(m => (
-          <View
-            key={m}
-            style={[s.towerMark, { left: `${m}%`, backgroundColor: m <= t.checkpoint ? c.gold : c.ghost }]}
-          />
-        ))}
-      </View>
-      <Text style={s.slotEffect}>
-        Best floor {t.best || "–"} · {t.climbs} climb{t.climbs === 1 ? "" : "s"} · Medium rules · {TOWER.lives} lives ·
-        checkpoint every {TOWER.checkpointEvery} floors
-        {t.cleared ? " · Phoenix Feather unlocked" : " · reach the top for the Phoenix Feather"}
-      </Text>
-    </View>
-  );
-}
-
 /** "45s", "12m", "3h 12m" */
 function formatDuration(seconds: number): string {
   const s = Math.round(seconds);
@@ -3570,54 +3419,6 @@ function powerUpColor(c: Palette, id: PowerUpId): string {
 }
 
 /** The 3-slot power-up bucket, what the next reward needs, and which effects are running. */
-/** Start screen: today's Daily Challenge, or today's result once it's been played. */
-function DailyCard({
-  c,
-  record,
-  streak,
-  onPlay,
-}: {
-  c: Palette;
-  record: DailyRecord | null; // today's attempt, if any
-  streak: DailyStreak;
-  onPlay: () => void;
-}) {
-  const s = styles(c);
-  const today = todayKey();
-  const streakText =
-    streak.count > 0 && (streak.lastDate === today || streak.lastDate === yesterdayKey())
-      ? ` · ${streak.count}-day streak`
-      : "";
-  if (record) {
-    return (
-      <View style={[s.dailyCard, s.dailyDone]} accessibilityLabel="Today's Daily Challenge is done">
-        <Text style={[s.label, { color: c.gold }]}>{getLook() === "court" ? "ROYAL DECREE" : "DAILY CHALLENGE"} · {prettyDate(today).toUpperCase()}</Text>
-        <Text style={s.dailyTitle}>
-          {record.finished ? `${record.score.toLocaleString()} points · round ${record.round}` : "Today's try is used up"}
-        </Text>
-        <Text style={s.slotEffect}>
-          Next challenge in {timeUntilTomorrow()}
-          {streakText}
-        </Text>
-      </View>
-    );
-  }
-  return (
-    <Pressable
-      onPress={onPlay}
-      style={({ pressed }) => [s.dailyCard, pressed && { transform: [{ scale: 0.98 }] }]}
-      accessibilityRole="button"
-      accessibilityLabel="Play today's Daily Challenge"
-    >
-      <Text style={[s.label, { color: c.gold }]}>{getLook() === "court" ? "ROYAL DECREE" : "DAILY CHALLENGE"} · {prettyDate(today).toUpperCase()}</Text>
-      <Text style={s.dailyTitle}>Play today’s challenge</Text>
-      <Text style={s.slotEffect}>
-        Same words for everyone today · Medium rules · one try{streakText}
-      </Text>
-    </Pressable>
-  );
-}
-
 /** Center of the top bar: the current combo multiplier and streak. */
 function ComboBadge({
   c,
@@ -3631,6 +3432,18 @@ function ComboBadge({
   streakOnly?: boolean; // Zen: no score, so just show the streak
 }) {
   const s = styles(c);
+  if (getLook() !== "court") {
+    const mult = comboMultiplier(streak);
+    const lit = streakOnly ? streak > 0 : mult > 1;
+    return (
+      <View style={s.comboPill} accessibilityLabel={streakOnly ? `Streak ${streak}` : `Combo ${mult} times, streak ${streak}`}>
+        <Animated.Text style={[s.comboMult, { color: lit ? (streakOnly ? c.good : c.gold) : c.muted, transform: [{ scale: pop }] }]}>
+          {streakOnly ? streak : `×${mult}`}
+        </Animated.Text>
+        <Text style={s.comboWord}>{streakOnly ? "streak" : "combo"}</Text>
+      </View>
+    );
+  }
   if (streakOnly) {
     return (
       <View style={[s.stat, s.combo]} accessibilityLabel={`Streak ${streak}`}>
@@ -3674,11 +3487,13 @@ function PowerUpTray({
   G,
   onUse,
   onUseBonus,
+  onPause,
 }: {
   c: Palette;
   G: GameState;
   onUse: (slot: number) => void;
   onUseBonus: () => void;
+  onPause: () => void;
 }) {
   const s = styles(c);
   const full = G.inventory.length >= REWARDS.bucketSize;
@@ -3692,6 +3507,87 @@ function PowerUpTray({
   if (G.phoenix) active.push({ text: "Phoenix ready", color: c.gold });
   if (G.doubleWords > 0) active.push({ text: `2× points · ${G.doubleWords} word${G.doubleWords > 1 ? "s" : ""}`, color: c.gold });
   if (G.tripleWords > 0) active.push({ text: `3× points · ${G.tripleWords} word${G.tripleWords > 1 ? "s" : ""}`, color: c.gold });
+
+  const activeRow =
+    active.length > 0 ? (
+      <View style={s.activeRow}>
+        {active.map(a => (
+          <View key={a.text} style={[s.activeChip, { borderColor: a.color }]}>
+            <Text style={[s.activeText, { color: a.color }]}>{a.text}</Text>
+          </View>
+        ))}
+      </View>
+    ) : null;
+
+  // Modern: one row of round glass buttons (slots, the gold bonus, pause).
+  if (getLook() !== "court") {
+    const round = (
+      key: string,
+      glyph: PowerUpId | "bonus",
+      name: string,
+      color: string,
+      onPress: () => void,
+      label: string,
+      bonus = false,
+    ) => (
+      <Pressable
+        key={key}
+        onPress={onPress}
+        disabled={!canUse}
+        style={({ pressed }) => [s.roundItem, { opacity: canUse ? 1 : 0.5 }, pressed && { transform: [{ scale: 0.94 }] }]}
+        accessibilityRole="button"
+        accessibilityLabel={label}
+      >
+        <View style={[s.roundBtn, bonus && s.roundBonus]}>
+          <PowerUpGlyph id={glyph} color={color} />
+        </View>
+        <Text style={[s.roundLabel, bonus && { color: c.gold }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
+          {name}
+        </Text>
+      </Pressable>
+    );
+    const paused = G.phase === "paused";
+    return (
+      <View style={[s.tray, { alignItems: "center" }]}>
+        {activeRow}
+        <View style={s.roundRow}>
+          {Array.from({ length: REWARDS.bucketSize }, (_, i) => {
+            const id = G.inventory[i];
+            if (!id)
+              return (
+                <View key={i} style={s.roundItem}>
+                  <View style={[s.roundBtn, s.roundEmpty]} />
+                  <Text style={[s.roundLabel, { color: c.ghost }]}>{full ? "" : "Empty"}</Text>
+                </View>
+              );
+            return round(String(i), id, POWERUPS[id].name, powerUpColor(c, id), () => onUse(i), `Use ${POWERUPS[id].name}: ${POWERUPS[id].effect}`);
+          })}
+          {G.bonus &&
+            round(
+              "bonus",
+              "bonus",
+              BONUS_POWERUPS[G.bonus].name,
+              c.gold,
+              onUseBonus,
+              `Use bonus ${BONUS_POWERUPS[G.bonus].name}: ${BONUS_POWERUPS[G.bonus].effect}`,
+              true,
+            )}
+          <Pressable
+            onPress={onPause}
+            hitSlop={6}
+            style={({ pressed }) => [s.roundItem, pressed && { transform: [{ scale: 0.94 }] }]}
+            accessibilityRole="button"
+            accessibilityLabel={paused ? "Resume" : "Pause"}
+          >
+            <View style={s.roundBtn}>
+              <PauseIcon color={c.ink} />
+            </View>
+            <Text style={s.roundLabel}>{paused ? "Resume" : "Pause"}</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
 
   // Royal Court: one row of cards (the gold bonus joins it), no header.
   if (getLook() === "court") {
@@ -3835,42 +3731,6 @@ function PowerUpTray({
         </View>
       )}
     </View>
-  );
-}
-
-function DifficultyCard({
-  c,
-  d,
-  best,
-  selected,
-  onPress,
-  livesOverride,
-}: {
-  c: Palette;
-  d: Difficulty;
-  best: number;
-  selected: boolean;
-  onPress: () => void;
-  livesOverride?: number; // Sudden Death: every difficulty has one life
-}) {
-  const s = styles(c);
-  const lives = livesOverride ?? d.lives;
-  const health = lives === 1 ? (livesOverride ? "1 life" : "No Lives") : `${lives} lives`;
-  return (
-    <Pressable
-      onPress={onPress}
-      style={[s.diffCard, selected && { borderColor: c.accent, backgroundColor: c.accentSoft }]}
-      accessibilityRole="radio"
-      accessibilityState={{ selected }}
-      accessibilityLabel={`${d.label}: ${formatSeconds(d.startTime)} down to ${formatSeconds(d.minTime)} per word, ${health}, ${d.words}`}
-    >
-      <Text style={[s.diffLabel, selected && { color: c.accent }]}>{d.label}</Text>
-      <Text style={s.diffDetail}>
-        {formatSeconds(d.startTime)} · {health}
-      </Text>
-      <Text style={s.diffWords}>{d.words}</Text>
-      {best > 0 ? <Text style={s.diffBest}>Best {best.toLocaleString()}</Text> : null}
-    </Pressable>
   );
 }
 
@@ -4095,9 +3955,12 @@ function make(c: Palette) {
   // Royal Court: carved serif titles and labels, squarer corners, gold trim, chunky primary buttons.
   const court = getLook() === "court";
   const F = court ? courtFonts : fonts;
-  const R = court ? 6 : 12; // card corners
+  const R = court ? 6 : 16; // card corners
   const pill = court ? 6 : 999; // chip corners
   const trim = court ? withAlpha(c.gold, 0.45) : c.line;
+  const glass = court ? "transparent" : c.surface; // Modern: frosted panels and chips
+  // A see-through surface (Royal Throne) is too thin for sheets and toasts drawn over the game; back it with the background.
+  const sheet = !court && c.surface.startsWith("rgba") ? withAlpha(lighten(c.bg, 0.06), 0.97) : c.surface;
   const caps = court ? courtFonts.displayMedium : fonts.bodyStrong; // small labels
   return StyleSheet.create({
     root: { flex: 1, backgroundColor: c.bg, paddingHorizontal: 18 },
@@ -4105,11 +3968,26 @@ function make(c: Palette) {
     combo: { alignItems: "center", flexShrink: 1 },
     stat: { gap: 2 },
     label: { fontFamily: caps, fontSize: 11, letterSpacing: court ? 1.8 : 1.3, color: c.muted },
-    value: { fontFamily: F.display, fontSize: court ? 24 : 30, lineHeight: court ? 30 : 34, color: c.ink, fontVariant: ["tabular-nums"] },
+    // Outfit's tabular digits have a footed "1"; Modern uses its regular figures.
+    value: { fontFamily: F.display, fontSize: 24, lineHeight: 30, color: c.ink, fontVariant: court ? ["tabular-nums"] : [] },
     meta: { fontFamily: fonts.body, fontSize: 13, color: c.muted },
-    hudMeta: court ? { display: "none" } : { fontFamily: fonts.body, fontSize: 13, color: c.muted },
+    hudMeta: { display: "none" },
+    comboPill: {
+      alignSelf: "center",
+      flexDirection: "row",
+      alignItems: "baseline",
+      gap: 6,
+      borderRadius: 999,
+      borderWidth: 1,
+      borderColor: c.line,
+      backgroundColor: c.surface,
+      paddingHorizontal: 14,
+      paddingVertical: 6,
+    },
+    comboMult: { fontFamily: fonts.display, fontSize: 20, lineHeight: 24 },
+    comboWord: { fontFamily: fonts.body, fontSize: 11, color: c.muted },
     livesRow: { marginTop: 14, alignItems: "center", gap: 6 },
-    pips: { flexDirection: "row", gap: 5 },
+    pips: { flexDirection: "row", gap: court ? 5 : 7 },
     pip: court
       ? {
           width: 17,
@@ -4121,7 +3999,7 @@ function make(c: Palette) {
           borderWidth: 1.5,
           borderColor: c.gold, // shields
         }
-      : { width: 22, height: 16, borderRadius: 3 },
+      : { height: 6, borderRadius: 3, shadowColor: c.miss, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } },
 
     stage: { flex: 1, alignItems: "center", justifyContent: "center", gap: 28 },
     wordWrap: { alignItems: "center", justifyContent: "flex-end" },
@@ -4134,7 +4012,7 @@ function make(c: Palette) {
     fuse: { width: "100%", maxWidth: 560, gap: 8 },
     fuseTrack: court
       ? { height: 12, borderRadius: 6, backgroundColor: c.line, borderWidth: 1, borderColor: trim, overflow: "hidden" }
-      : { height: 10, borderRadius: 999, backgroundColor: c.line, overflow: "hidden" },
+      : { height: 5, borderRadius: 999, backgroundColor: c.line, overflow: "hidden" },
     fuseFill: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, borderRadius: 999, transformOrigin: "left" },
     fuseHot: {},
     fuseRow: { flexDirection: "row", justifyContent: "space-between" },
@@ -4174,7 +4052,17 @@ function make(c: Palette) {
           borderRadius: 8,
           backgroundColor: c.surface,
         }
-      : { marginTop: 14, gap: 6, alignItems: "center" },
+      : {
+          marginTop: 14,
+          gap: 9,
+          alignItems: "center",
+          paddingHorizontal: 16,
+          paddingVertical: 14,
+          borderWidth: 1,
+          borderColor: c.line,
+          borderRadius: 22,
+          backgroundColor: c.surface,
+        },
     courtCard: {
       flex: 1,
       minHeight: 60,
@@ -4189,7 +4077,40 @@ function make(c: Palette) {
     },
     courtCardName: { fontFamily: courtFonts.displayMedium, fontSize: 13, textAlign: "center" },
     courtCardEffect: { fontFamily: fonts.body, fontSize: 10, lineHeight: 13, color: c.muted, textAlign: "center" },
-    courtBossName: { fontFamily: courtFonts.display, fontSize: 22, color: c.ink, textAlign: "center" },
+    courtBossName: court
+      ? { fontFamily: courtFonts.display, fontSize: 22, color: c.ink, textAlign: "center" }
+      : {
+          fontFamily: fonts.display,
+          fontSize: 28,
+          lineHeight: 34,
+          letterSpacing: -0.5,
+          color: c.ink,
+          textAlign: "center",
+          textShadowColor: withAlpha(c.gold, 0.4),
+          textShadowRadius: 18,
+        },
+    roundRow: { flexDirection: "row", justifyContent: "center", gap: 10 },
+    roundItem: { width: 62, alignItems: "center", gap: 6 },
+    roundBtn: {
+      width: 54,
+      height: 54,
+      borderRadius: 27,
+      borderWidth: 1,
+      borderColor: c.line,
+      backgroundColor: c.surface,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    roundBonus: {
+      borderColor: withAlpha(c.gold, 0.75),
+      backgroundColor: withAlpha(c.gold, 0.16),
+      shadowColor: c.gold,
+      shadowOpacity: 0.5,
+      shadowRadius: 12,
+      shadowOffset: { width: 0, height: 0 },
+    },
+    roundEmpty: { borderStyle: "dashed", backgroundColor: "transparent" },
+    roundLabel: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.muted, textAlign: "center" },
     courtRound: {
       width: 44,
       height: 44,
@@ -4203,7 +4124,7 @@ function make(c: Palette) {
     bossHpRow: { flexDirection: "row", gap: 6, alignSelf: "stretch", justifyContent: "center" },
     bossArmored: { borderWidth: 2, borderRadius: 8, padding: 4, gap: 4 },
     bossCrack: { position: "absolute", right: 0, top: 0, bottom: 0 },
-    bossHpSeg: { flex: 1, maxWidth: 70, height: 10, borderRadius: 3, overflow: "hidden" },
+    bossHpSeg: { flex: 1, maxWidth: 70, height: court ? 10 : 8, borderRadius: court ? 3 : 4, overflow: "hidden" },
     bossName: {
       fontFamily: F.display,
       fontSize: 44,
@@ -4233,7 +4154,7 @@ function make(c: Palette) {
     activeChip: { borderWidth: 1, borderRadius: pill, paddingHorizontal: 8, paddingVertical: 2 },
     activeText: { fontFamily: fonts.bodyStrong, fontSize: 11 },
     controls: { flexDirection: "row", justifyContent: "center", gap: 10 },
-    chip: { borderWidth: 1, borderColor: trim, borderRadius: pill, paddingHorizontal: 12, paddingVertical: 6 },
+    chip: { borderWidth: 1, borderColor: trim, borderRadius: pill, paddingHorizontal: 12, paddingVertical: 6, backgroundColor: glass },
     chipText: { fontFamily: caps, fontSize: 11, letterSpacing: court ? 1.4 : 1, color: c.muted },
 
     hiddenInput: { position: "absolute", width: 1, height: 1, opacity: 0, left: -10, top: 0 },
@@ -4245,8 +4166,8 @@ function make(c: Palette) {
     panel: {
       width: "100%",
       maxWidth: 520,
-      backgroundColor: c.surface,
-      borderRadius: court ? 10 : 18,
+      backgroundColor: sheet,
+      borderRadius: court ? 10 : 24,
       borderWidth: court ? 1.5 : 1,
       borderColor: trim,
       maxHeight: "100%",
@@ -4267,7 +4188,7 @@ function make(c: Palette) {
     diffDetail: { fontFamily: fonts.bodyStrong, fontSize: 12, color: c.ink, fontVariant: ["tabular-nums"] },
     diffWords: { fontFamily: fonts.body, fontSize: 12, lineHeight: 16, color: c.muted },
     diffBest: { fontFamily: fonts.bodyStrong, fontSize: 11, color: c.good, marginTop: 2 },
-    btnSecondary: { backgroundColor: "transparent", borderWidth: 1, borderColor: trim, borderBottomWidth: 1, borderBottomColor: trim },
+    btnSecondary: { backgroundColor: glass, borderWidth: 1, borderColor: trim, borderBottomWidth: 1, borderBottomColor: trim, shadowOpacity: 0 },
     eyebrow: { fontFamily: caps, fontSize: 11, letterSpacing: court ? 2.4 : 1.6, color: c.accent },
     h1: court
       ? { fontFamily: F.display, fontSize: 40, lineHeight: 46, color: c.gold, letterSpacing: 2, textAlign: "center" }
@@ -4291,10 +4212,19 @@ function make(c: Palette) {
           borderBottomWidth: 5, // a chunky, pressable edge
           borderBottomColor: "rgba(0, 0, 0, 0.4)",
         }
-      : { backgroundColor: c.accent, borderRadius: R, paddingVertical: 15, alignItems: "center" },
+      : {
+          backgroundColor: c.accent,
+          borderRadius: 999,
+          paddingVertical: 16,
+          alignItems: "center",
+          shadowColor: c.accent,
+          shadowOpacity: 0.35,
+          shadowRadius: 16,
+          shadowOffset: { width: 0, height: 6 },
+        },
     btnText: court
       ? { fontFamily: courtFonts.display, fontSize: 15, letterSpacing: 1.2, color: c.onAccent }
-      : { fontFamily: fonts.bodyStrong, fontSize: 16, color: c.onAccent },
+      : { fontFamily: fonts.display, fontSize: 17, color: c.onAccent },
 
     setGroup: { borderWidth: 1, borderColor: trim, borderRadius: R, paddingHorizontal: 12, marginTop: -6 },
     setRow: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 11 },
@@ -4374,7 +4304,7 @@ function make(c: Palette) {
       borderRadius: 14,
       paddingHorizontal: 14,
       paddingVertical: 10,
-      backgroundColor: c.surface,
+      backgroundColor: sheet,
       gap: 2,
       shadowColor: "#000",
       shadowOpacity: 0.25,
