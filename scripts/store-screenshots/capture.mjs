@@ -17,7 +17,7 @@ const DEVICES = {
   ipad: { viewport: { width: 1032, height: 1376 }, deviceScaleFactor: 2, insets: { top: 24, bottom: 20 } },
 };
 
-const ONLY = process.env.ONLY || "12345";
+const ONLY = process.env.ONLY || "12345"; // add "6" for the purchase review screenshot
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function open(browser, dev) {
@@ -151,7 +151,23 @@ async function scenes(browser, dev) {
   }
 }
 
+// 6. Paywall, for the in-app purchase's review screenshot in App Store Connect (saved unframed).
+async function paywall(browser, dev) {
+  const { ctx, page } = await open(browser, dev);
+  await clickText(page, "Typo Tyrant Pro");
+  await page.waitForSelector('text="Unlock everything"');
+  await sleep(900);
+  // The web build has no App Store, so it shows a development-only "Test mode" note; real builds never do.
+  await page.evaluate(() => {
+    for (const e of document.querySelectorAll("div"))
+      if (e.childElementCount === 0 && (e.textContent || "").startsWith("Test mode:")) e.style.display = "none";
+  });
+  await shot(page, dev, "6-paywall");
+  await ctx.close();
+}
+
 const browser = await chromium.launch();
+if (ONLY.includes("6")) await paywall(browser, "phone");
 for (const dev of process.argv.slice(2).length ? process.argv.slice(2) : ["phone", "ipad"]) {
   await scenes(browser, dev);
 }

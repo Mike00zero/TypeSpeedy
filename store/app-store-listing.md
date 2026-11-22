@@ -86,11 +86,23 @@ Long live the Tyrant! The first release of Typo Tyrant.
 | Price | $3.99 (Tier 4) |
 | Display name (30) | Typo Tyrant Pro |
 | Description (45) | Every quest, theme and word pack, forever. |
-| Review screenshot | The paywall: tap a Pro quest tile with no free tries left, or Settings on the main menu → Typo Tyrant Pro → Unlock |
+| Review screenshot | `store/review/pro-paywall.png` (the paywall: tap "Typo Tyrant Pro" at the bottom of the main menu) |
 
 **Review notes for the purchase:**
 
 Typo Tyrant Pro is a one-time, non-consumable unlock. It removes the one-try-per-day limit on four game modes (Tower Climb, Marathon Mix, Boss Rush, Sudden Death) and lets players use the color themes and word packs they earn. To see the paywall, open Settings from the main menu and tap "Unlock" under Typo Tyrant Pro, or start a Pro quest after using its free daily try. "Restore purchases" is in Settings and on the paywall.
+
+### Getting the purchase ready (do this before submitting 1.0.1)
+
+Apple reviews your first in-app purchase together with the app, so it has to be attached to the version.
+
+1. **App Store Connect → your app → Monetization → In-App Purchases → Typo Tyrant Pro.**
+2. Check **Price Schedule** is set ($3.99) and **Availability** includes your countries.
+3. Under **App Store Localization** (English (U.S.)), set the display name and description above.
+4. Under **Review Information**, upload `store/review/pro-paywall.png` and paste the review notes above.
+5. Save. The status should change from "Missing Metadata" to **"Ready to Submit"**.
+6. Once a build is uploaded, open the **iOS App 1.0.1** version page, scroll to **In-App Purchases and Subscriptions**, click **Select In-App Purchases** and tick **Typo Tyrant Pro**. (If the section isn't there yet, add your build to the version first, then look again.)
+7. In **RevenueCat**, confirm the current offering's Lifetime package still holds `typotyrant.pro`, and that the App Store connection shows no errors.
 
 ---
 
