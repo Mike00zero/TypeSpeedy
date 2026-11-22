@@ -10,16 +10,6 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.typotyrant.app",
       "infoPlist": {
-        "UISupportedInterfaceOrientations~ipad": [
-          "UIInterfaceOrientationPortrait",
-          "UIInterfaceOrientationPortraitUpsideDown",
-          "UIInterfaceOrientationLandscapeLeft",
-          "UIInterfaceOrientationLandscapeRight",
-          "UIInterfaceOrientationPortrait",
-          "UIInterfaceOrientationPortraitUpsideDown",
-          "UIInterfaceOrientationLandscapeLeft",
-          "UIInterfaceOrientationLandscapeRight"
-        ],
         "ITSAppUsesNonExemptEncryption": false
       }
     },
@@ -70,6 +60,12 @@
       "eas": {
         "projectId": "7b127078-e878-4bca-b439-b9a74a8ed9a2"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/7b127078-e878-4bca-b439-b9a74a8ed9a2"
     }
   }
 }
