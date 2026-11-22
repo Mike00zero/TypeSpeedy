@@ -1,4 +1,4 @@
-# Typo Tyrant: App Store listing (v1.0.0)
+# Typo Tyrant: App Store listing (v1.0.1)
 
 Copy-paste text for App Store Connect. Character limits are Apple's; counts are checked.
 
@@ -22,7 +22,7 @@ Copy-paste text for App Store Connect. Character limits are Apple's; counts are 
 | Support URL | https://mike00zero.github.io/TypeSpeedy/support.html |
 | Marketing URL (optional) | https://mike00zero.github.io/TypeSpeedy/ |
 | Copyright | 2026 Mike Pisanchik |
-| Version | 1.0.0 |
+| Version | 1.0.1 |
 
 ### Promotional Text (170, can change any time without review)
 
