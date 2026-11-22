@@ -189,6 +189,9 @@ export function ModernMenu(p: ModernMenuProps) {
           </Pressable>
         </View>
 
+        {/* Spare height (tall phones, iPad) splits above and below the menu, keeping it centered */}
+        <View style={s.grow} />
+
         <View style={[s.hero, s.pad]}>
           <View style={s.crownWrap}>
             {/* Soft round glow behind the crown. (A shadow on the image itself draws as a box on iOS.) */}
@@ -324,6 +327,8 @@ export function ModernMenu(p: ModernMenuProps) {
           ))}
         </View>
 
+        <View style={s.grow} />
+
         {p.royalPass.show && (
           <Pressable onPress={p.royalPass.onPress} style={s.pass} accessibilityRole="button">
             <Text style={[s.small, { color: c.gold, fontFamily: F.displayMedium }]}>Typo Tyrant Pro</Text>
@@ -441,6 +446,7 @@ function make(c: Palette) {
     iconBtn: { alignItems: "center", gap: 6, width: "24%" },
     iconLabel: { fontFamily: F.bodyStrong, fontSize: 11, color: c.muted },
 
-    pass: { marginTop: "auto", flexDirection: "row", justifyContent: "center", gap: 6, paddingTop: 4 },
+    grow: { flexGrow: 1, marginVertical: -8 }, // cancels the extra 16pt row gap the spacer adds
+    pass: { flexDirection: "row", justifyContent: "center", gap: 6, paddingTop: 4 },
   });
 }

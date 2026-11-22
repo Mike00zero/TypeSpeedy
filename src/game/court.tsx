@@ -157,6 +157,9 @@ export function CourtMenu(p: CourtMenuProps) {
           </Pressable>
         </View>
 
+        {/* Spare height (tall phones, iPad) splits above and below the menu, keeping it centered */}
+        <View style={s.grow} />
+
         <View style={s.header}>
           <Image source={require("../../assets/crown.png")} style={s.crown} accessibilityIgnoresInvertColors />
           <Text style={s.title} accessibilityRole="header">
@@ -263,6 +266,8 @@ export function CourtMenu(p: CourtMenuProps) {
             </Pressable>
           ))}
         </View>
+
+        <View style={s.grow} />
 
         {p.royalPass.show && (
           <Pressable onPress={p.royalPass.onPress} style={s.pass} accessibilityRole="button">
@@ -387,8 +392,8 @@ function make(c: Palette) {
     },
     gridText: { fontFamily: F.displayMedium, fontSize: 14, color: c.ink },
 
+    grow: { flexGrow: 1, marginVertical: -8 }, // cancels the extra 16pt row gap the spacer adds
     pass: {
-      marginTop: "auto",
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "center",
