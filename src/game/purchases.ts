@@ -47,6 +47,34 @@ function store(): typeof Purchases | null {
   return Purchases;
 }
 
+/**
+ * A plain-language reason for a RevenueCat error, ending in its code so support emails can say exactly what failed.
+ * Codes: https://www.revenuecat.com/docs/test-and-launch/errors
+ */
+function explain(e: unknown, fallback: string): string {
+  const code = String((e as { code?: string | number } | null)?.code ?? "");
+  const tag = code ? ` (code ${code})` : "";
+  switch (code) {
+    case "3": // PURCHASE_NOT_ALLOWED
+      return `Purchases are turned off on this device. Check Settings → Screen Time → Content & Privacy Restrictions.${tag}`;
+    case "5": // PRODUCT_NOT_AVAILABLE_FOR_PURCHASE
+    case "23": // CONFIGURATION (the App Store returned no products)
+      return `Pro isn't available from the App Store right now. Please try again later.${tag}`;
+    case "6": // PRODUCT_ALREADY_PURCHASED
+      return `This Apple Account already owns Pro. Tap Restore purchases to unlock it.${tag}`;
+    case "10": // NETWORK
+    case "35": // OFFLINE_CONNECTION
+      return `Couldn't reach the App Store. Check your connection and try again.${tag}`;
+    case "20": // PAYMENT_PENDING (e.g. Ask to Buy)
+      return `Your purchase is waiting for approval. Pro unlocks as soon as it's approved.${tag}`;
+    case "2": // STORE_PROBLEM
+    case "32": // PRODUCT_REQUEST_TIMED_OUT
+      return `The App Store had a problem. Please try again in a moment.${tag}`;
+    default:
+      return `${fallback}${tag}`;
+  }
+}
+
 const ownsPro = (info: CustomerInfo) => typeof info.entitlements.active[ENTITLEMENT] !== "undefined";
 
 /** The Lifetime package of the current offering (holds `typotyrant.pro`). */
@@ -95,7 +123,7 @@ export async function buyPro(): Promise<PurchaseResult> {
     return ownsPro(customerInfo) ? { ok: true } : { ok: false, reason: "The purchase didn’t go through. You haven’t been charged." };
   } catch (e) {
     if ((e as { userCancelled?: boolean | null }).userCancelled) return { ok: false, reason: "", cancelled: true };
-    return { ok: false, reason: "The purchase didn’t go through. Please try again." };
+    return { ok: false, reason: explain(e, "The purchase didn’t go through. Please try again.") };
   }
 }
 
@@ -106,7 +134,7 @@ export async function restorePro(): Promise<PurchaseResult> {
   try {
     const info = await p.restorePurchases();
     return ownsPro(info) ? { ok: true } : { ok: false, reason: "No Pro purchase was found for this Apple account." };
-  } catch {
-    return { ok: false, reason: "Couldn’t reach the App Store. Check your connection and try again." };
+  } catch (e) {
+    return { ok: false, reason: explain(e, "Couldn’t reach the App Store. Check your connection and try again.") };
   }
 }
